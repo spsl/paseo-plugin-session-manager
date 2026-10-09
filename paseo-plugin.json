@@ -1,0 +1,9 @@
+{
+  "id": "session-manager",
+  "name": "会话看板",
+  "description": "用 LLM 分析 Agent 会话状态、标题、摘要和下一步",
+  "media": [],
+  "requirements": {
+    "paseo": "^0.11.0"
+  }
+}

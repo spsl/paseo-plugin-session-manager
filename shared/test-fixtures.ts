@@ -1,0 +1,40 @@
+import type { SessionView } from "./types";
+
+/** Test helper: a complete SessionView with overridable fields. */
+export function makeSession(overrides: Partial<SessionView> = {}): SessionView {
+  return {
+    id: "agent-1",
+    provider: "codex",
+    model: null,
+    cwd: "/Users/ada/projects/app",
+    workspaceId: "ws-1",
+    parentAgentId: null,
+    projectKey: "proj-1",
+    projectName: "App",
+    workspaceName: null,
+    branch: null,
+    worktreeRoot: null,
+    agentTitle: null,
+    lifecycle: "idle",
+    liveness: "live",
+    pendingPermissionCount: 0,
+    attentionReason: null,
+    analysisState: "ready",
+    analysis: null,
+    analysisError: null,
+    manualStatusOverride: null,
+    titleState: { lastWritten: null, userOwned: false, lastWriteError: null },
+    createdAt: 1_000,
+    updatedAt: 1_000,
+    completedAt: 1_000,
+    archivedAt: null,
+    turnCount: 1,
+    lastUserInput: "实现会话看板",
+    modelStatus: "unclear",
+    effectiveStatus: "unclear",
+    column: "unclear",
+    needsAttention: false,
+    draggable: true,
+    ...overrides,
+  };
+}
