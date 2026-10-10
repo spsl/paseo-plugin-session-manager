@@ -1,8 +1,10 @@
 import type { PluginTheme } from "@getpaseo/plugin";
+import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { canDrop } from "../shared/drop-target";
 import { COLUMNS } from "../shared/presentation";
 import type { BoardColumn, SessionView } from "../shared/types";
+import { BOARD_GAP, BOARD_PADDING, columnWidthFor, MIN_COLUMN_WIDTH } from "./board-model";
 import { SessionCard } from "./session-card";
 import { columnTone, toneBackground } from "./styles";
 import type { BoardDrag } from "./use-board-drag";
@@ -60,7 +62,7 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
   );
 }
 
-function BoardColumnView(props: CommonProps & { column: ColumnDef }) {
+function BoardColumnView(props: CommonProps & { column: ColumnDef; width: number | null }) {
   const { theme, drag, column } = props;
   const { colors } = theme;
   const tone = columnTone(theme, column.id);
@@ -75,9 +77,9 @@ function BoardColumnView(props: CommonProps & { column: ColumnDef }) {
       }}
       collapsable={false}
       style={{
-        flexGrow: 1,
-        flexBasis: 260,
-        minWidth: 260,
+        ...(props.width === null
+          ? { flexGrow: 1, flexBasis: MIN_COLUMN_WIDTH, minWidth: MIN_COLUMN_WIDTH }
+          : { width: props.width, flexGrow: 0, flexShrink: 0 }),
         borderRadius: 10,
         borderWidth: hovered ? 2 : 1,
         borderColor,
@@ -104,16 +106,21 @@ function BoardColumnView(props: CommonProps & { column: ColumnDef }) {
 }
 
 /** Wide layout: all five columns in a horizontal scroller. */
-export function WideColumns(props: CommonProps) {
+export function WideColumns(props: CommonProps & { columnWidthPercent: number }) {
+  const [containerWidth, setContainerWidth] = useState(0);
+  const width = columnWidthFor(containerWidth, props.columnWidthPercent, COLUMNS.length);
   return (
     <ScrollView
       horizontal
       scrollEnabled={props.drag === null ? true : props.drag.scrollEnabled}
       style={{ flex: 1 }}
-      contentContainerStyle={{ flexGrow: 1, gap: 12, padding: 12 }}
+      onLayout={function measure(event) {
+        setContainerWidth(event.nativeEvent.layout.width);
+      }}
+      contentContainerStyle={{ flexGrow: 1, gap: BOARD_GAP, padding: BOARD_PADDING }}
     >
       {COLUMNS.map(function renderColumn(column) {
-        return <BoardColumnView key={column.id} {...props} column={column} />;
+        return <BoardColumnView key={column.id} {...props} column={column} width={width} />;
       })}
     </ScrollView>
   );

@@ -1,8 +1,9 @@
-import type { PluginScreenProps } from "@getpaseo/plugin/client";
+import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Animated, Pressable, ScrollView, Text, View } from "react-native";
 import { COLUMNS } from "../shared/presentation";
+import { ANALYZER_SETTINGS, DEFAULT_ANALYZER_SETTINGS } from "../shared/settings";
 import {
   buildProjectFilter,
   filterSessionsByProject,
@@ -55,6 +56,11 @@ export function BoardScreen(props: PluginScreenProps) {
   const compact = layout.compact;
   const toast = useToast();
   const snapshot = useSnapshot();
+  const settings = useSettings(ANALYZER_SETTINGS);
+  const columnWidthPercent =
+    settings.status === "ready"
+      ? settings.values.columnWidthPercent
+      : DEFAULT_ANALYZER_SETTINGS.columnWidthPercent;
   const actions = useSessionActions();
   const now = useNow(30_000);
   useSnapshotNudges();
@@ -247,7 +253,16 @@ export function BoardScreen(props: PluginScreenProps) {
       </View>
     );
   } else {
-    body = <WideColumns theme={theme} now={now} groups={groups} drag={dragApi} onOpen={onOpen} />;
+    body = (
+      <WideColumns
+        theme={theme}
+        now={now}
+        groups={groups}
+        drag={dragApi}
+        onOpen={onOpen}
+        columnWidthPercent={columnWidthPercent}
+      />
+    );
   }
 
   return (

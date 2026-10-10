@@ -130,3 +130,25 @@ export function patchForget<T extends WithSessions>(snapshot: T, sessionId: stri
     }),
   };
 }
+
+/** Wide-board geometry: horizontal padding and gap between the five columns. */
+export const BOARD_PADDING = 12;
+export const BOARD_GAP = 12;
+export const MIN_COLUMN_WIDTH = 200;
+
+/**
+ * Width of one column: `percent` of the width that would make all columns fill
+ * `containerWidth`, never below MIN_COLUMN_WIDTH. null until the container is measured.
+ */
+export function columnWidthFor(
+  containerWidth: number,
+  percent: number,
+  columnCount: number,
+): number | null {
+  if (!(containerWidth > 0) || columnCount < 1) {
+    return null;
+  }
+  const fill = (containerWidth - BOARD_PADDING * 2 - BOARD_GAP * (columnCount - 1)) / columnCount;
+  const clamped = Math.min(100, Math.max(1, percent));
+  return Math.max(MIN_COLUMN_WIDTH, Math.floor((fill * clamped) / 100));
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { makeSession } from "../shared/test-fixtures";
 import {
   attentionSessions,
+  columnWidthFor,
   groupByColumn,
   patchClearManualStatus,
   patchForget,
@@ -102,5 +103,21 @@ describe("optimistic patches", () => {
     const snap = { sessions: [makeSession({ id: "a" }), makeSession({ id: "b" })] };
     expect(patchReanalyze(snap, "a").sessions[0].analysisState).toBe("queued");
     expect(patchForget(snap, "a").sessions.map((s) => s.id)).toEqual(["b"]);
+  });
+});
+
+describe("columnWidthFor", () => {
+  it("returns null before the container is measured", () => {
+    expect(columnWidthFor(0, 60, 5)).toBeNull();
+  });
+
+  it("scales the fill width by the percentage", () => {
+    // fill = (1824 - 24 - 48) / 5 = 350.4
+    expect(columnWidthFor(1824, 100, 5)).toBe(350);
+    expect(columnWidthFor(1824, 60, 5)).toBe(210);
+  });
+
+  it("never goes below the minimum width", () => {
+    expect(columnWidthFor(900, 30, 5)).toBe(200);
   });
 });
