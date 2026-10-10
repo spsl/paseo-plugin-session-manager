@@ -39,6 +39,9 @@ export type SessionRecord = Omit<
   firstUserMessageKnown: boolean;
   analyzedTurnId: string | null;
   titleState: TitleState;
+  /** Agent labels from the last snapshot; only meaningful when `labelsKnown`. */
+  labels: Record<string, string>;
+  labelsKnown: boolean;
 };
 
 export type StateStore = {
@@ -147,6 +150,19 @@ function hydrateTitleState(value: unknown): TitleState {
   };
 }
 
+function hydrateLabels(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const labels: Record<string, string> = {};
+  for (const [key, label] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof label === "string") {
+      labels[key] = label;
+    }
+  }
+  return labels;
+}
+
 export function hydrateRecord(value: unknown): SessionRecord | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -164,6 +180,7 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     .slice(-MAX_TURNS_PER_SESSION);
   const attention = oneOf(["finished", "error", "permission"] as const, record.attentionReason);
   const manual = oneOf<AnalysisStatus>(ANALYSIS_STATUSES, record.manualStatusOverride);
+  const labels = record.labelsKnown === true ? hydrateLabels(record.labels) : null;
   return {
     id,
     provider: boundedText(record.provider) ?? "unknown",
@@ -195,6 +212,8 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     firstUserMessage: boundedText(record.firstUserMessage),
     firstUserMessageKnown: record.firstUserMessageKnown === true,
     analyzedTurnId: boundedText(record.analyzedTurnId),
+    labels: labels ?? {},
+    labelsKnown: labels !== null,
   };
 }
 
@@ -203,6 +222,7 @@ export function copyRecord(record: SessionRecord): SessionRecord {
     ...record,
     turns: record.turns.map((turn) => ({ ...turn })),
     titleState: { ...record.titleState },
+    labels: { ...record.labels },
     analysis: record.analysis
       ? {
           ...record.analysis,

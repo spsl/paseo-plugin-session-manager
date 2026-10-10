@@ -14,6 +14,7 @@ export type SnapshotLike = {
   activeTurn?: unknown;
   pendingPermissions?: readonly unknown[];
   title?: string | null;
+  labels?: Readonly<Record<string, string>> | null;
   attentionReason?: string | null;
   archivedAt?: string | null;
   createdAt?: string;
@@ -100,6 +101,8 @@ export function newRecord(
     firstUserMessage: null,
     firstUserMessageKnown: false,
     analyzedTurnId: null,
+    labels: {},
+    labelsKnown: false,
   };
   if (agent.status !== undefined) {
     applyAgentSnapshot(record, agent, project);
@@ -134,6 +137,29 @@ export function applyHookAgent(record: SessionRecord, agent: SnapshotLike): bool
   return changed;
 }
 
+/** Stores the agent labels on the record; returns whether anything changed. */
+export function applyLabels(record: SessionRecord, labels: Readonly<Record<string, string>>): boolean {
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labels)) {
+    if (typeof value === "string") {
+      next[key] = value;
+    }
+  }
+  const keys = Object.keys(next);
+  const same =
+    record.labelsKnown &&
+    keys.length === Object.keys(record.labels).length &&
+    keys.every(function matches(key) {
+      return record.labels[key] === next[key];
+    });
+  if (same) {
+    return false;
+  }
+  record.labels = next;
+  record.labelsKnown = true;
+  return true;
+}
+
 /** Applies a Paseo snapshot; returns whether anything changed. */
 export function applyAgentSnapshot(
   record: SessionRecord,
@@ -147,6 +173,9 @@ export function applyAgentSnapshot(
       changed = true;
     }
   };
+  if (agent.labels) {
+    changed = applyLabels(record, agent.labels) || changed;
+  }
   set("liveness", deriveLiveness(agent));
   set("lifecycle", deriveLifecycle(agent));
   set("pendingPermissionCount", agent.pendingPermissions?.length ?? 0);

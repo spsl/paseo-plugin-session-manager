@@ -2,6 +2,7 @@ import {
   normalizeAnalysisConfig,
   type AnalysisConfig,
 } from "../shared/analysis-config";
+import { isExcludedAgent, parseExclusions, type AgentExclusion } from "../shared/agent-filter";
 import type { AnalyzerSettings } from "../shared/settings";
 import type { Analysis, AnalysisStatus, SessionDetail, SessionView } from "../shared/types";
 import { CliAnalyzer, DEFAULT_ANALYZER_TIMEOUT_MS, type Analyzer } from "./analyzer/analyzer";
@@ -19,7 +20,7 @@ import type {
   TurnEndedEvent,
   TurnStartedEvent,
 } from "./host-types";
-import { applyAgentSnapshot, applyHookAgent, newRecord } from "./lifecycle";
+import { applyAgentSnapshot, applyHookAgent, applyLabels, newRecord } from "./lifecycle";
 import { projectDetail, projectView } from "./projection";
 import {
   MAX_TURNS_PER_SESSION,
@@ -108,6 +109,8 @@ export class SessionManagerService {
   private stopped = false;
   private problemCache: { key: string; at: number; value: string | null } | null = null;
   private readonly idleWaiters: Array<() => void> = [];
+  private readonly labelProbes = new Map<string, Promise<void>>();
+  private exclusionCache: { text: string; rules: AgentExclusion[] } | null = null;
 
   constructor(private readonly deps: ServiceDeps) {
     this.analyzer = deps.analyzer ?? new CliAnalyzer();
@@ -155,6 +158,7 @@ export class SessionManagerService {
 
   /** Called when settings change: queued work may now be runnable. */
   settingsChanged(): void {
+    this.pruneExcluded();
     this.drain();
   }
 
@@ -175,8 +179,79 @@ export class SessionManagerService {
     } else {
       record = newRecord(agent, this.now());
       this.records.set(record.id, record);
+      void this.probeLabels(record.id);
     }
     return record;
+  }
+
+  // ---- agent exclusion (other plugins' helper agents) --------------------
+
+  private exclusions(): AgentExclusion[] {
+    const text = this.deps.settings.current().excludedLabelKeys ?? "";
+    if (!this.exclusionCache || this.exclusionCache.text !== text) {
+      this.exclusionCache = { text, rules: parseExclusions(text) };
+    }
+    return this.exclusionCache.rules;
+  }
+
+  private isExcludedRecord(record: SessionRecord): boolean {
+    return record.labelsKnown && isExcludedAgent(record.labels, this.exclusions());
+  }
+
+  private removeRecord(id: string): void {
+    this.records.delete(id);
+    this.queued.delete(id);
+    const index = this.queue.indexOf(id);
+    if (index >= 0) {
+      this.queue.splice(index, 1);
+    }
+    this.persist();
+  }
+
+  private pruneExcluded(): void {
+    for (const record of [...this.records.values()]) {
+      if (this.isExcludedRecord(record)) {
+        this.removeRecord(record.id);
+      }
+    }
+  }
+
+  /** Learns an agent's labels in the background (hooks carry none); drops it when excluded. */
+  private probeLabels(id: string): Promise<void> {
+    const paseo = this.paseo;
+    const existing = this.labelProbes.get(id);
+    if (existing) {
+      return existing;
+    }
+    const record = this.records.get(id);
+    if (!paseo || !record || record.labelsKnown) {
+      return Promise.resolve();
+    }
+    const probe = this.fetchLabels(paseo, id).finally(() => {
+      this.labelProbes.delete(id);
+    });
+    this.labelProbes.set(id, probe);
+    return probe;
+  }
+
+  private async fetchLabels(paseo: PaseoApi, id: string): Promise<void> {
+    try {
+      const fresh = await paseo.agents.ref(id).refresh();
+      const record = this.records.get(id);
+      if (!fresh || !record) {
+        return;
+      }
+      if (fresh.agent.labels) {
+        applyLabels(record, fresh.agent.labels);
+      }
+      if (this.isExcludedRecord(record)) {
+        this.removeRecord(id);
+      } else {
+        this.persist();
+      }
+    } catch {
+      // Labels stay unknown; reconcile will fill them in.
+    }
   }
 
   onCreated(event: CreatedEvent): void {
@@ -363,6 +438,16 @@ export class SessionManagerService {
   private async runAnalysis(id: string): Promise<void> {
     const record = this.records.get(id);
     if (!record) {
+      return;
+    }
+    if (!record.labelsKnown) {
+      await this.probeLabels(id);
+    }
+    if (this.records.get(id) !== record) {
+      return;
+    }
+    if (this.isExcludedRecord(record)) {
+      this.removeRecord(id);
       return;
     }
     const targetTurnId = record.turns.at(-1)?.id;
@@ -614,7 +699,8 @@ export class SessionManagerService {
     const sessions = [...this.records.values()]
       .filter(
         (record) =>
-          record.liveness === "live" || (record.archivedAt ?? record.updatedAt) >= cutoff,
+          !this.isExcludedRecord(record) &&
+          (record.liveness === "live" || (record.archivedAt ?? record.updatedAt) >= cutoff),
       )
       .map(projectView)
       .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -684,12 +770,20 @@ export class SessionManagerService {
       cursor = next;
     }
     const retention = this.deps.settings.current().closedRetentionDays * DAY_MS;
+    const exclusions = this.exclusions();
     const seen = new Set<string>();
     let changed = false;
     for (const entry of entries) {
       const agent = entry.agent;
       seen.add(agent.id);
       const existing = this.records.get(agent.id);
+      if (agent.labels && isExcludedAgent(agent.labels, exclusions)) {
+        if (existing) {
+          this.removeRecord(agent.id);
+          changed = true;
+        }
+        continue;
+      }
       if (existing) {
         changed = applyAgentSnapshot(existing, agent, entry.project) || changed;
         continue;

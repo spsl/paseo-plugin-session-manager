@@ -3,7 +3,7 @@ import { DEFAULT_ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/sett
 import type { Analysis } from "../shared/types";
 import type { Analyzer } from "./analyzer/analyzer";
 import type { AnalyzerInput } from "./analyzer/prompt";
-import type { ArchivedEvent, ClosedEvent, TurnEndedEvent } from "./host-types";
+import type { ArchivedEvent, ClosedEvent, PaseoApi, TurnEndedEvent } from "./host-types";
 import { SessionManagerService } from "./service";
 import type { SessionRecord, StateStore } from "./store";
 
@@ -290,5 +290,90 @@ describe("SessionManagerService", () => {
     expect((await service.applyGeneratedTitle("a1")).ok).toBe(true);
     expect(writeTitle).toHaveBeenCalledTimes(2);
     expect(renamed.titleState.userOwned).toBe(false);
+  });
+  describe("excluded helper agents", () => {
+    const entry = (id: string, labels: Record<string, string>, parentAgentId: string | null = null) => ({
+      agent: {
+        id,
+        provider: "claude",
+        cwd: "/w",
+        status: "idle",
+        labels,
+        parentAgentId,
+        title: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      project: { projectKey: "p", projectName: "P", checkout: { currentBranch: "main" } },
+    });
+
+    function fakePaseo(labelsById: Record<string, Record<string, string>>, entries: unknown[] = []) {
+      const refresh = vi.fn(async (id: string) => {
+        const labels = labelsById[id];
+        return labels ? entry(id, labels) : null;
+      });
+      const paseo = {
+        agents: {
+          ref: (id: string) => ({ id, refresh: () => refresh(id) }),
+          list: async () => ({ entries, pageInfo: { hasMore: false, nextCursor: null } }),
+        },
+      } as unknown as PaseoApi;
+      return { paseo, refresh };
+    }
+
+    it("removes a hook-created agent found excluded via refresh and never analyzes it", async () => {
+      const { analyzer, calls } = fakeAnalyzer(true);
+      const { service } = make({}, analyzer);
+      const { paseo, refresh } = fakePaseo({ h1: { "herald.role": "summarizer" } });
+      service.touchPaseo(paseo);
+      service.onCreated({ agent: agent("h1") });
+      service.onTurnEnded(turnEnded("t1", "摘要", "h1"));
+      await service.waitForIdle();
+      await tick();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(service.getRecord("h1")).toBeUndefined();
+      expect(calls).toHaveLength(0);
+    });
+
+    it("keeps agents whose labels are not excluded, including sub-agents", async () => {
+      const { analyzer, calls } = fakeAnalyzer(true);
+      const { service } = make({}, analyzer);
+      const { paseo } = fakePaseo({ s1: { team: "x" } });
+      service.touchPaseo(paseo);
+      service.onCreated({ agent: { ...agent("s1"), parentAgentId: "parent" } });
+      service.onTurnEnded(turnEnded("t1", "完成", "s1"));
+      await service.waitForIdle();
+      expect(service.getRecord("s1")).toMatchObject({ labelsKnown: true });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("reconcile skips and removes excluded agents", async () => {
+      const { service } = make();
+      service.onCreated({ agent: agent("old") });
+      const { paseo } = fakePaseo(
+        {},
+        [
+          entry("old", { "herald.role": "summarizer" }),
+          entry("new", { "herald.role": "summarizer" }),
+          entry("sub", { other: "1" }, "parent"),
+        ],
+      );
+      await service.reconcile(paseo);
+      expect(service.getRecord("old")).toBeUndefined();
+      expect(service.getRecord("new")).toBeUndefined();
+      expect(service.getRecord("sub")).toBeDefined();
+    });
+
+    it("matches key=value rules and drops newly excluded known records on settings change", async () => {
+      const { service, setSettings } = make({ excludedLabelKeys: "" });
+      const { paseo } = fakePaseo({}, [entry("a", { kind: "helper" }), entry("b", { kind: "main" })]);
+      await service.reconcile(paseo);
+      expect(service.size()).toBe(2);
+      setSettings({ excludedLabelKeys: "kind=helper" });
+      service.settingsChanged();
+      expect(service.getRecord("a")).toBeUndefined();
+      expect(service.getRecord("b")).toBeDefined();
+      expect((await service.snapshot()).sessions.map((session) => session.id)).toEqual(["b"]);
+    });
   });
 });

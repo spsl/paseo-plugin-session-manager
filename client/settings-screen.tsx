@@ -374,6 +374,16 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               void save({ closedRetentionDays: value });
             }}
           />
+          <TextCommitInput
+            label="排除的 Agent 标签"
+            hint="带这些标签键的 Agent（通常是其他插件创建的辅助 Agent）不显示也不分析；多个用逗号分隔，可写 key 或 key=value。默认 herald.role"
+            placeholder="herald.role"
+            initialValue={values?.excludedLabelKeys ?? "herald.role"}
+            disabled={disabled}
+            onCommit={function commit(value) {
+              void save({ excludedLabelKeys: value });
+            }}
+          />
           <NumberInput
             label="看板列宽（%）"
             hint="相对于五列铺满屏幕时的宽度，范围 30–100，默认 60；每列最窄 200px。"
