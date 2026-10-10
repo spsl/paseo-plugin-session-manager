@@ -1,4 +1,4 @@
-import { TITLE_MAX_LENGTH, ANALYSIS_STATUSES, type Analysis, type Turn } from "../../shared/types";
+import { TITLE_MAX_LENGTH, SPEECH_MAX_LENGTH, ANALYSIS_STATUSES, type Analysis, type Turn } from "../../shared/types";
 import { MAX_ANALYSIS_LIST_ITEMS, MAX_ANALYSIS_TEXT_LENGTH } from "./output";
 
 export type AnalyzerInput = {
@@ -28,6 +28,7 @@ export function buildAnalysisSchema(): Record<string, unknown> {
     required: [
       "title",
       "summary",
+      "speech",
       "goal",
       "status",
       "progress",
@@ -40,6 +41,7 @@ export function buildAnalysisSchema(): Record<string, unknown> {
     properties: {
       title: { type: "string", minLength: 1, maxLength: TITLE_MAX_LENGTH },
       summary: { type: "string", maxLength: 2_000 },
+      speech: { type: "string", minLength: 1, maxLength: SPEECH_MAX_LENGTH },
       goal: { type: "string", maxLength: MAX_ANALYSIS_TEXT_LENGTH },
       status: { type: "string", enum: ANALYSIS_STATUSES },
       progress: list,
@@ -62,6 +64,7 @@ export const INVARIANT_INSTRUCTIONS = [
   "只能分析下方 JSON 数据；不得调用工具、修改文件或改变外部状态。",
   "必须只输出符合 JSON Schema 的对象，不要输出 Markdown、代码围栏或解释。",
   `title 必须使用中文、单行、最多 ${TITLE_MAX_LENGTH} 个字符，只描述当前任务，不要加入状态、时间或 Agent 名称。`,
+  `speech 必须是一到两句中文，最多 ${SPEECH_MAX_LENGTH} 个字符，纯文本（不要 Markdown、代码，除非没有其他方式说明否则也不要出现文件路径）；以会话的名称或标题开头，说明刚完成了什么、是否还有事情需要用户处理；若是在提问，说明问的是什么以及可选项。`,
   "结论必须以证据为准：只有会话明确说明任务完成时才能使用 completed；需要用户确认、选择、权限或补充信息时使用 waiting_for_user；证据不足时使用 unclear。",
   "若 Agent 正在等待权限审批或回答问题，status 使用 waiting_for_user 且 needsUserAttention=true。",
 ].join("\n");

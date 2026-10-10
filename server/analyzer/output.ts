@@ -1,5 +1,6 @@
 import {
   ANALYSIS_STATUSES,
+  SPEECH_MAX_LENGTH,
   TITLE_MAX_LENGTH,
   normalizeTitle,
   type Analysis,
@@ -41,6 +42,24 @@ function analysisTitle(record: Record<string, unknown>): string {
     throw new Error('分析结果字段 title 无效')
   }
   return normalized
+}
+
+/** Optional for older analyzers; when present it must be a string, and is trimmed to the card/voice limit. */
+function analysisSpeech(record: Record<string, unknown>): string | undefined {
+  const value = record.speech
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'string') {
+    throw new Error('分析结果字段 speech 无效')
+  }
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return undefined
+  }
+  return normalized.length > SPEECH_MAX_LENGTH
+    ? `${normalized.slice(0, SPEECH_MAX_LENGTH - 1)}…`
+    : normalized
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -99,9 +118,11 @@ export function parseAnalysis(value: unknown): Analysis {
   if (typeof record.needsUserAttention !== 'boolean') {
     throw new Error('分析结果人工介入字段无效')
   }
+  const speech = analysisSpeech(record)
   return {
     title: analysisTitle(record),
     summary: text(record, 'summary', 2_000),
+    ...(speech === undefined ? {} : { speech }),
     goal: text(record, 'goal'),
     status: status as Analysis['status'],
     progress: textList(record, 'progress'),

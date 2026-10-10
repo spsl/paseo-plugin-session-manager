@@ -52,10 +52,15 @@ export const BOARD_COLUMNS = [
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 export const BoardColumnSchema = z.enum(BOARD_COLUMNS);
 
+/** Max characters of the one-sentence spoken/card summary. */
+export const SPEECH_MAX_LENGTH = 80;
+
 export const AnalysisSchema = z.object({
   /** A concise, model-generated description of the current task. */
   title: z.string(),
   summary: z.string(),
+  /** One or two plain Chinese sentences for the card and voice; absent on older persisted analyses. */
+  speech: z.string().optional(),
   goal: z.string(),
   status: AnalysisStatusSchema,
   progress: z.array(z.string()),
@@ -66,6 +71,15 @@ export const AnalysisSchema = z.object({
   confidence: z.number(),
 });
 export type Analysis = z.infer<typeof AnalysisSchema>;
+
+/** The sentence to show or speak: `speech`, falling back to `summary` for older analyses. */
+export function speechOf(analysis: Pick<Analysis, "speech" | "summary">): string {
+  const speech = analysis.speech?.replace(/\s+/g, " ").trim();
+  if (speech) {
+    return speech;
+  }
+  return analysis.summary.replace(/\s+/g, " ").trim();
+}
 
 export const TURN_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];

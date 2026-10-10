@@ -7,12 +7,30 @@ import {
   openBoardInNewWindow,
 } from "./client/open-board-window";
 import { isDesktop } from "./client/desktop-bridge";
+import { startAnnouncer } from "./client/announcer";
+import { SessionTimelineCard } from "./client/timeline-card";
+import { SESSION_CARD_KIND, SESSION_CARD_VERSION, SessionCardSchema } from "./shared/card";
 import { BOARD_SCREEN_ID, BoardSidebarItem } from "./client/sidebar";
 
 const BOARD_TITLE = "会话看板";
 
 export default function contribute(client: PluginClientContext) {
   const cleanups: (() => void)[] = [];
+
+  // Runs for as long as this client is connected, screen open or not; it is what speaks.
+  const announcer = startAnnouncer(client);
+  cleanups.push(function stopAnnouncer() {
+    announcer.stop();
+  });
+  // Draws the rows `server/cards.ts` appends to agent transcripts.
+  cleanups.push(
+    client.addTimelineRenderer({
+      kind: SESSION_CARD_KIND,
+      version: SESSION_CARD_VERSION,
+      schema: SessionCardSchema,
+      Component: SessionTimelineCard,
+    }),
+  );
 
   cleanups.push(client.addScreen({ id: BOARD_SCREEN_ID, title: BOARD_TITLE, Component: BoardScreen }));
   cleanups.push(

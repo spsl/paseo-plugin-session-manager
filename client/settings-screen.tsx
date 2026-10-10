@@ -20,7 +20,9 @@ import {
   type AnalyzerAgent,
 } from "../shared/analysis-config";
 import { ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/settings";
-import { testAnalyzerRpc } from "../shared/rpc";
+import { speechVoicesRpc, testAnalyzerRpc } from "../shared/rpc";
+import { SPEECH_SETTINGS, RATE_OPTIONS, type SpeechEngine, type SpeechSettings, type SpeechVoice } from "../shared/speech";
+import { getAnnouncer, isMutedHere, mirrorSettings, setMutedHere } from "./announcer";
 import { PromptEditor } from "./prompt-editor";
 import { errorText } from "./styles";
 
@@ -130,6 +132,234 @@ function TextCommitInput(props: {
         timer.current = setTimeout(flush, SAVE_DEBOUNCE_MS);
       }}
     />
+  );
+}
+
+const TEST_SENTENCE = "会话看板：这是一条测试语音，之后的播报会像这样。";
+
+function SpeechSection(props: { disabled?: boolean }) {
+  const toast = useToast();
+  const settings = useSettings(SPEECH_SETTINGS);
+  const fetchVoices = useRpc(speechVoicesRpc);
+  const [voices, setVoices] = useState<{ available: boolean; voices: SpeechVoice[] } | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [muted, setMuted] = useState(isMutedHere());
+
+  useEffect(
+    function loadVoices() {
+      let cancelled = false;
+      fetchVoices({})
+        .then(function done(result) {
+          if (!cancelled) setVoices(result);
+        })
+        .catch(function failed() {
+          if (!cancelled) setVoices({ available: false, voices: [] });
+        });
+      return function cancel() {
+        cancelled = true;
+      };
+    },
+    [fetchVoices],
+  );
+
+  useEffect(
+    function mirror() {
+      if (settings.status === "ready") mirrorSettings(settings.values);
+    },
+    [settings],
+  );
+
+  const save = useCallback(
+    async function save(patch: Partial<SpeechSettings>): Promise<void> {
+      if (settings.status !== "ready") return;
+      const saved = await settings.save({ ...settings.values, ...patch }, settings.revision);
+      if (!saved) {
+        toast.error("设置已被其他设备修改，已重新加载");
+        await settings.reload();
+      }
+    },
+    [settings, toast],
+  );
+
+  const onTest = useCallback(
+    async function onTest(): Promise<void> {
+      const announcer = getAnnouncer();
+      if (announcer === null) return;
+      setTesting(true);
+      try {
+        // Forced: this is where the voice is chosen, and in a browser it is the
+        // press that hands the page its audio permission.
+        await announcer.speakText(TEST_SENTENCE, { force: true });
+      } catch (error) {
+        toast.error(errorText(error));
+      } finally {
+        setTesting(false);
+      }
+    },
+    [toast],
+  );
+
+  const values = settings.status === "ready" ? settings.values : null;
+  const disabled = values === null || props.disabled === true;
+  const sayAvailable = voices?.available === true;
+  const voiceOptions: { label: string; value: string }[] = [
+    { label: "自动（优先中文婷婷，否则系统默认）", value: "" },
+  ];
+  for (const voice of voices?.voices ?? []) {
+    if (voice.lang.toLowerCase().indexOf("zh") === 0) {
+      voiceOptions.push({ label: `${voice.name} · ${voice.lang}`, value: voice.name });
+    }
+  }
+  const currentVoice = values?.sayVoice ?? "";
+  if (currentVoice !== "" && !voiceOptions.some((option) => option.value === currentVoice)) {
+    voiceOptions.push({ label: `${currentVoice}（当前）`, value: currentVoice });
+  }
+
+  return (
+    <SettingsGroup title="语音播报">
+      {settings.status === "error" || settings.status === "invalid" ? (
+        <Text style={{ fontSize: 13 }}>{`语音设置加载失败：${settings.error}`}</Text>
+      ) : null}
+      <SettingsSection title="总开关">
+        <SettingsSwitch
+          label="语音播报"
+          hint="每轮分析完成、需要授权或回答时，用一句话播报。"
+          value={values?.enabled ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ enabled: value });
+          }}
+        />
+        <SettingsSwitch
+          label="桌面端播报"
+          value={values?.speakOnDesktop ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ speakOnDesktop: value });
+          }}
+        />
+        <SettingsSwitch
+          label="浏览器播报"
+          hint="浏览器要求先有一次用户操作：打开页面后点一次“测试语音”即可解锁。"
+          value={values?.speakInBrowser ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ speakInBrowser: value });
+          }}
+        />
+        <SettingsSwitch
+          label="手机震动提醒"
+          hint="手机端无法由插件朗读，仅在无法播放音频时震动提醒。"
+          value={values?.vibrateOnMobile ?? false}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ vibrateOnMobile: value });
+          }}
+        />
+        <SettingsSwitch
+          label="本机静音"
+          hint="只对这台设备生效，重启应用后恢复。"
+          value={muted}
+          onValueChange={function toggle(value) {
+            setMutedHere(value);
+            setMuted(value);
+          }}
+        />
+      </SettingsSection>
+      <SettingsSection title="声音">
+        <SettingsSelect<SpeechEngine>
+          label="声音来源"
+          hint="守护进程所在的 Mac 用 say 合成（更自然）；不可用时回退到本机浏览器语音。"
+          value={values?.engine ?? "say"}
+          options={[
+            {
+              label: voices !== null && !sayAvailable ? "守护进程 Mac（say，不可用）" : "守护进程 Mac（say）",
+              value: "say",
+            },
+            { label: "本机浏览器", value: "web" },
+          ]}
+          disabled={disabled}
+          onValueChange={function change(value) {
+            void save({ engine: value });
+          }}
+        />
+        <SettingsSelect<string>
+          label="声音"
+          value={currentVoice}
+          options={voiceOptions}
+          disabled={disabled || !sayAvailable}
+          onValueChange={function change(value) {
+            void save({ sayVoice: value });
+          }}
+        />
+        <SettingsSelect<string>
+          label="语速"
+          value={values?.rate ?? "1"}
+          options={RATE_OPTIONS.map(function toOption(rate) {
+            return { label: `${rate}×`, value: rate };
+          })}
+          disabled={disabled}
+          onValueChange={function change(value) {
+            const match = RATE_OPTIONS.find(function same(rate) {
+              return rate === value;
+            });
+            if (match !== undefined) void save({ rate: match });
+          }}
+        />
+        <SettingsAction
+          label="测试语音"
+          hint="按所选声音朗读一句测试语音；也会解锁浏览器的音频权限。"
+          actionLabel={testing ? "播放中…" : "测试语音"}
+          disabled={testing}
+          onPress={function press() {
+            void onTest();
+          }}
+        />
+      </SettingsSection>
+      <SettingsSection title="播报哪些事件">
+        <SettingsSwitch
+          label="完成"
+          value={values?.announceFinished ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ announceFinished: value });
+          }}
+        />
+        <SettingsSwitch
+          label="需要处理（含提问）"
+          value={values?.announceWaiting ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ announceWaiting: value });
+          }}
+        />
+        <SettingsSwitch
+          label="等待授权"
+          value={values?.announcePermission ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ announcePermission: value });
+          }}
+        />
+        <SettingsSwitch
+          label="失败"
+          value={values?.announceError ?? true}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ announceError: value });
+          }}
+        />
+        <SettingsSwitch
+          label="子 Agent 也播报"
+          hint="默认关闭：由其他 Agent 启动的子 Agent 只显示卡片，不朗读（父 Agent 会汇报结果）。"
+          value={values?.announceSubagents ?? false}
+          disabled={disabled}
+          onValueChange={function toggle(value) {
+            void save({ announceSubagents: value });
+          }}
+        />
+      </SettingsSection>
+    </SettingsGroup>
   );
 }
 
@@ -396,6 +626,7 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
           />
         </SettingsSection>
       </SettingsGroup>
+      <SpeechSection />
     </ScrollView>
   );
 }

@@ -4,7 +4,7 @@ import {
 } from "../shared/analysis-config";
 import { isExcludedAgent, parseExclusions, type AgentExclusion } from "../shared/agent-filter";
 import type { AnalyzerSettings } from "../shared/settings";
-import type { Analysis, AnalysisStatus, SessionDetail, SessionView } from "../shared/types";
+import type { Analysis, AnalysisStatus, SessionDetail, SessionView, Turn } from "../shared/types";
 import { CliAnalyzer, DEFAULT_ANALYZER_TIMEOUT_MS, type Analyzer } from "./analyzer/analyzer";
 import type { AnalyzerInput } from "./analyzer/prompt";
 import { resolveAnalyzerBinary } from "./cli";
@@ -31,6 +31,8 @@ import {
 import { decideTitleWrite, writeTitleViaCli } from "./title-writeback";
 import { firstUserMessageFrom, turnFromTurnEnded, turnsFromTimelineEntries } from "./turns";
 import { normalizeTitle } from "../shared/types";
+import { sessionDisplayName } from "../shared/card";
+import type { Notifier, NotifyAgent } from "./notifier";
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const RECONCILE_WAIT_CAP_MS = 4_000;
@@ -40,6 +42,11 @@ const SEED_MAX_AGENTS = 50;
 const SEED_TIMELINE_LIMIT = 300;
 const PROBLEM_CACHE_MS = 30_000;
 const DAY_MS = 86_400_000;
+const MAX_TRACKED_GATES = 300;
+/** Another plugin's helper agents are never carded or announced, whatever the board setting says. */
+const NEVER_NOTIFY = parseExclusions("herald.role");
+
+type CardTurn = { turnId: string; gate: Promise<boolean> };
 
 export type SettingsProvider = {
   /** Last known settings (defaults when unreadable); synchronous. */
@@ -55,6 +62,8 @@ export type ServiceDeps = {
   /** Returns a human-readable problem with the analyzer setup, or null. */
   checkAnalyzer?: (config: AnalysisConfig, command: string) => Promise<string | null>;
   now?: () => number;
+  /** Cards and announcements; absent means none are produced. */
+  notifier?: Notifier;
 };
 
 export type MutationResult = { ok: boolean; reason?: string };
@@ -111,6 +120,9 @@ export class SessionManagerService {
   private readonly idleWaiters: Array<() => void> = [];
   private readonly labelProbes = new Map<string, Promise<void>>();
   private exclusionCache: { text: string; rules: AgentExclusion[] } | null = null;
+  /** The turn per agent whose pending card is on screen, with the check that allows cards for it. */
+  private readonly cardTurns = new Map<string, CardTurn>();
+  private readonly requestGates = new Map<string, Promise<boolean>>();
 
   constructor(private readonly deps: ServiceDeps) {
     this.analyzer = deps.analyzer ?? new CliAnalyzer();
@@ -159,6 +171,11 @@ export class SessionManagerService {
   /** Called when settings change: queued work may now be runnable. */
   settingsChanged(): void {
     this.pruneExcluded();
+    if (!this.deps.settings.current().enabled) {
+      for (const [id, entry] of [...this.cardTurns]) {
+        this.finishTurnCard(id, entry.turnId, "failed", "自动分析已关闭");
+      }
+    }
     this.drain();
   }
 
@@ -196,6 +213,97 @@ export class SessionManagerService {
 
   private isExcludedRecord(record: SessionRecord): boolean {
     return record.labelsKnown && isExcludedAgent(record.labels, this.exclusions());
+  }
+
+  // ---- cards and announcements (best-effort, never block hooks) ----------
+
+  /** Whether cards may be produced for this agent: labels known and not another plugin's helper. */
+  private cardsAllowed(id: string): Promise<boolean> {
+    const run = async (): Promise<boolean> => {
+      try {
+        const record = this.records.get(id);
+        if (!record) {
+          return false;
+        }
+        if (!record.labelsKnown) {
+          await this.probeLabels(id);
+        }
+        const fresh = this.records.get(id);
+        return (
+          fresh !== undefined &&
+          fresh.labelsKnown &&
+          !isExcludedAgent(fresh.labels, NEVER_NOTIFY) &&
+          !this.isExcludedRecord(fresh)
+        );
+      } catch {
+        return false;
+      }
+    };
+    return run();
+  }
+
+  private notifyAgent(record: SessionRecord): NotifyAgent {
+    return {
+      id: record.id,
+      parentAgentId: record.parentAgentId,
+      name: sessionDisplayName({
+        agentTitle: record.agentTitle,
+        analysisTitle: record.analysis?.title ?? null,
+        cwd: record.cwd,
+      }),
+    };
+  }
+
+  private beginTurnCard(record: SessionRecord, turnId: string): void {
+    const notifier = this.deps.notifier;
+    if (!notifier || !this.deps.settings.current().enabled) {
+      return;
+    }
+    const previous = this.cardTurns.get(record.id);
+    if (previous && previous.turnId !== turnId) {
+      this.finishTurnCard(record.id, previous.turnId, "superseded");
+    }
+    const gate = this.cardsAllowed(record.id);
+    this.cardTurns.set(record.id, { turnId, gate });
+    const id = record.id;
+    void gate.then((ok) => {
+      const paseo = this.paseo;
+      const current = this.records.get(id);
+      if (ok && paseo && current) {
+        return notifier.turnPending(paseo, this.notifyAgent(current), turnId);
+      }
+      return undefined;
+    });
+  }
+
+  /** Ends the pending card of `turnId` (if one was shown) with a final state. */
+  private finishTurnCard(
+    id: string,
+    turnId: string,
+    outcome: "superseded" | "failed" | { analysis: Analysis; turnOutcome: Turn["outcome"] },
+    error?: string,
+  ): void {
+    const notifier = this.deps.notifier;
+    const entry = this.cardTurns.get(id);
+    if (!notifier || !entry || entry.turnId !== turnId) {
+      return;
+    }
+    this.cardTurns.delete(id);
+    void entry.gate.then((ok) => {
+      const paseo = this.paseo;
+      const record = this.records.get(id);
+      if (!ok || !paseo || !record) {
+        return undefined;
+      }
+      const agent = this.notifyAgent(record);
+      if (outcome === "superseded") {
+        return notifier.turnSuperseded(paseo, agent, turnId);
+      }
+      if (outcome === "failed") {
+        return notifier.turnFailed(paseo, agent, turnId, error ?? "分析失败");
+      }
+      return notifier.turnReady(paseo, agent, turnId, outcome.analysis, outcome.turnOutcome);
+    });
   }
 
   private removeRecord(id: string): void {
@@ -276,6 +384,54 @@ export class SessionManagerService {
     record.attentionReason = "permission";
     record.updatedAt = this.now();
     this.persist();
+    this.notifyPermissionRequested(record, event);
+  }
+
+  private notifyPermissionRequested(record: SessionRecord, event: PermissionRequestedEvent): void {
+    const notifier = this.deps.notifier;
+    if (!notifier) {
+      return;
+    }
+    const gate = this.cardsAllowed(record.id);
+    this.requestGates.set(event.request.id, gate);
+    if (this.requestGates.size > MAX_TRACKED_GATES) {
+      const oldest = this.requestGates.keys().next();
+      if (!oldest.done) {
+        this.requestGates.delete(oldest.value);
+      }
+    }
+    const id = record.id;
+    void gate.then((ok) => {
+      const paseo = this.paseo;
+      const current = this.records.get(id);
+      if (ok && paseo && current) {
+        return notifier.permissionRequested(paseo, this.notifyAgent(current), event.request);
+      }
+      return undefined;
+    });
+  }
+
+  private notifyPermissionResolved(record: SessionRecord, event: PermissionResolvedEvent): void {
+    const notifier = this.deps.notifier;
+    const gate = this.requestGates.get(event.requestId);
+    if (!notifier || !gate) {
+      return;
+    }
+    this.requestGates.delete(event.requestId);
+    const id = record.id;
+    void gate.then((ok) => {
+      const paseo = this.paseo;
+      const current = this.records.get(id);
+      if (ok && paseo && current) {
+        return notifier.permissionResolved(
+          paseo,
+          this.notifyAgent(current),
+          event.requestId,
+          event.resolution.behavior,
+        );
+      }
+      return undefined;
+    });
   }
 
   onPermissionResolved(event: PermissionResolvedEvent): void {
@@ -291,6 +447,7 @@ export class SessionManagerService {
     }
     record.updatedAt = this.now();
     this.persist();
+    this.notifyPermissionResolved(record, event);
   }
 
   onTurnEnded(event: TurnEndedEvent): void {
@@ -335,6 +492,7 @@ export class SessionManagerService {
       record.completedAt = turn.completedAt;
       record.analysisError = null;
       record.analysisState = "queued";
+      this.beginTurnCard(record, turn.id);
       this.enqueue(record.id);
     }
     this.persist();
@@ -389,6 +547,7 @@ export class SessionManagerService {
       }
       if (record.liveness === "archived") {
         this.settleDropped(record);
+        this.finishTurnCard(id, record.turns.at(-1)?.id ?? "", "failed", "会话已归档，已跳过分析");
         continue;
       }
       this.running.add(id);
@@ -465,12 +624,15 @@ export class SessionManagerService {
     }
     const current = this.records.get(id);
     if (!current || current.turns.at(-1)?.id !== targetTurnId) {
+      // A newer turn arrived: its card replaces this one.
+      this.finishTurnCard(id, targetTurnId, "superseded");
       return;
     }
     if (current.liveness === "archived") {
       this.settleDropped(current);
       current.analysisState = current.analysis ? "ready" : "awaiting_output";
       this.persist();
+      this.finishTurnCard(id, targetTurnId, "failed", "会话已归档，已跳过分析");
       return;
     }
     if (result) {
@@ -479,11 +641,16 @@ export class SessionManagerService {
       current.analysisError = null;
       current.analyzedTurnId = targetTurnId;
       this.persist();
+      this.finishTurnCard(id, targetTurnId, {
+        analysis: result,
+        turnOutcome: current.turns.at(-1)?.outcome ?? "completed",
+      });
       void this.maybeWriteBackTitle(id, result.title);
     } else {
       current.analysisState = "failed";
       current.analysisError = failure;
       this.persist();
+      this.finishTurnCard(id, targetTurnId, "failed", failure ?? "分析失败");
     }
   }
 

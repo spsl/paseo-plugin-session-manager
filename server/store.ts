@@ -105,6 +105,7 @@ function hydrateAnalysis(value: unknown): Analysis | null {
     return items.map((item) => boundedText(item) as string);
   };
   const summary = boundedText(record.summary);
+  const speech = boundedText(record.speech);
   const goal = boundedText(record.goal);
   const title = normalizeTitle(record.title) ?? normalizeTitle(goal);
   const status = oneOf(ANALYSIS_STATUSES, record.status);
@@ -130,6 +131,7 @@ function hydrateAnalysis(value: unknown): Analysis | null {
   return {
     title,
     summary,
+    ...(speech ? { speech } : {}),
     goal,
     status,
     progress,
