@@ -6,6 +6,8 @@ import { isExcludedAgent, parseExclusions, type AgentExclusion } from "../shared
 import type { AnalyzerSettings } from "../shared/settings";
 import type { Analysis, AnalysisStatus, SessionDetail, SessionView, Turn } from "../shared/types";
 import { CliAnalyzer, DEFAULT_ANALYZER_TIMEOUT_MS, type Analyzer } from "./analyzer/analyzer";
+import { MagpieAnalyzer } from "./analyzer/magpie";
+import type { MagpieRunConfig } from "./analyzer/magpie";
 import type { AnalyzerInput } from "./analyzer/prompt";
 import { resolveAnalyzerBinary } from "./cli";
 import type {
@@ -86,6 +88,10 @@ export function describeAnalysisError(error: unknown): string {
 }
 
 async function defaultCheckAnalyzer(config: AnalysisConfig, command: string): Promise<string | null> {
+  if (config.agent === "magpie") {
+    // The direct adapter has no binary to find; its own request surfaces problems.
+    return null;
+  }
   try {
     await resolveAnalyzerBinary(config.agent, command);
     return null;
@@ -109,6 +115,7 @@ export class SessionManagerService {
   private readonly queued = new Set<string>();
   private readonly running = new Set<string>();
   private readonly analyzer: Analyzer;
+  private readonly magpieAnalyzer: MagpieAnalyzer;
   private readonly now: () => number;
   private paseo: PaseoApi | null = null;
   private reconcileInFlight: Promise<void> | null = null;
@@ -126,7 +133,13 @@ export class SessionManagerService {
 
   constructor(private readonly deps: ServiceDeps) {
     this.analyzer = deps.analyzer ?? new CliAnalyzer();
+    this.magpieAnalyzer = new MagpieAnalyzer();
     this.now = deps.now ?? Date.now;
+  }
+
+  /** Magpie talks HTTP, so it never goes through the CLI analyzer. */
+  private analyzerFor(agent: AnalysisConfig["agent"]): Analyzer | MagpieAnalyzer {
+    return agent === "magpie" ? this.magpieAnalyzer : this.analyzer;
   }
 
   // ---- lifecycle -------------------------------------------------------
@@ -589,9 +602,18 @@ export class SessionManagerService {
     };
   }
 
-  private runConfig(): AnalysisConfig & { command: string; timeoutMs: number } {
+  private runConfig(): MagpieRunConfig & { command: string; timeoutMs: number } {
     const settings = this.deps.settings.current();
     const config = normalizeAnalysisConfig(settings);
+    if (config.agent === "magpie") {
+      return {
+        ...config,
+        command: "",
+        timeoutMs: (settings.timeoutSeconds || DEFAULT_ANALYZER_TIMEOUT_MS / 1000) * 1000,
+        baseUrl: settings.magpieBaseUrl.trim() || undefined,
+        apiKey: settings.magpieApiKey,
+      };
+    }
     return {
       ...config,
       command: settings.command,
@@ -623,7 +645,8 @@ export class SessionManagerService {
     let result: Analysis | null = null;
     let failure: string | null = null;
     try {
-      result = await this.analyzer.analyze(this.buildInput(record), this.runConfig());
+      const config = this.runConfig();
+      result = await this.analyzerFor(config.agent).analyze(this.buildInput(record), config);
     } catch (error) {
       failure = describeAnalysisError(error);
     }
@@ -843,7 +866,8 @@ export class SessionManagerService {
       previousAnalysis: null,
     };
     try {
-      const analysis = await this.analyzer.analyze(input, this.runConfig());
+      const config = this.runConfig();
+      const analysis = await this.analyzerFor(config.agent).analyze(input, config);
       return { ok: true, durationMs: Date.now() - startedAt, title: analysis.title };
     } catch (error) {
       return { ok: false, durationMs: Date.now() - startedAt, error: describeAnalysisError(error) };

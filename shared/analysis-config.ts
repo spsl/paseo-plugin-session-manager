@@ -3,8 +3,11 @@
  * `src/shared/session-observer-analysis.ts` with a static model seed list.
  */
 
-/** Agents with a non-interactive, text-input analysis adapter. */
-export const ANALYZER_AGENTS = ["codex", "claude", "pi"] as const;
+/**
+ * `magpie` is the direct HTTP adapter (one chat completion, no CLI); the other
+ * three shell out to the matching coding-agent CLI.
+ */
+export const ANALYZER_AGENTS = ["codex", "claude", "pi", "magpie"] as const;
 export type AnalyzerAgent = (typeof ANALYZER_AGENTS)[number];
 
 export type ThinkingLevel =
@@ -56,6 +59,7 @@ const AGENT_OPTIONS: readonly AnalyzerAgentOption[] = [
   { id: "codex", label: "Codex" },
   { id: "claude", label: "Claude" },
   { id: "pi", label: "Pi" },
+  { id: "magpie", label: "Magpie" },
 ];
 
 const LEVEL_LABELS: Record<string, string> = {
@@ -100,12 +104,15 @@ const MODEL_OPTIONS: Record<AnalyzerAgent, readonly ModelDefinition[]> = {
     { id: "haiku", label: "Haiku", thinkingLevels: [] },
   ],
   pi: [{ id: "default", label: "Config default", thinkingLevels: [] }],
+  // Magpie's catalog is fetched from the local proxy, so there is no seed here.
+  magpie: [],
 };
 
 const THINKING_OPTIONS: Record<AnalyzerAgent, readonly ThinkingLevelOption[]> = {
   codex: levels("ultra"),
   claude: levels("max", "low"),
   pi: levels("xhigh", "low"),
+  magpie: levels("max", "low"),
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -131,6 +138,11 @@ export function getAnalyzerModelOptions(agent: AnalyzerAgent): readonly Analyzer
 function defaultModelForAgent(agent: AnalyzerAgent): string {
   if (agent === "claude") {
     return "sonnet";
+  }
+  if (agent === "magpie") {
+    // The catalog is live; this seed is only the placeholder shown before the
+    // first fetch lands, and the settings screen replaces it with a real id.
+    return "group/openai-gpt-6.1-sol";
   }
   return MODEL_OPTIONS[agent][0]?.id ?? DEFAULT_ANALYSIS_CONFIG.model;
 }

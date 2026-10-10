@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePiModelList, piModelReference } from "./pi-models";
+import { parseMagpieModelList, parsePiModelList, piModelReference } from "./pi-models";
 
 const HEADER = "provider        model                               context  max-out  thinking  images";
 
@@ -64,5 +64,42 @@ describe("pi model list", () => {
       "magpie/antigravity/gemini-3.8-flash",
       "magpie/antigravity/gemini-pro-agent",
     ]);
+  });
+});
+
+describe("magpie model list", () => {
+  it("reads /v1/models entries with context, output and reasoning flags", () => {
+    const result = parseMagpieModelList({
+      data: [
+        {
+          id: "group/openai-gpt-6.1-sol",
+          context_window: 922000,
+          max_output_tokens: 128000,
+          reasoning: true,
+        },
+        { id: "antigravity/gemini-pro-agent", context_window: 1000000, reasoning: false },
+      ],
+    });
+    expect(result.problem).toBeNull();
+    expect(result.models).toEqual([
+      {
+        id: "group/openai-gpt-6.1-sol",
+        label: "group/openai-gpt-6.1-sol · 922K · 128K",
+        provider: "magpie",
+        thinking: true,
+      },
+      {
+        id: "antigravity/gemini-pro-agent",
+        label: "antigravity/gemini-pro-agent · 1.0M",
+        provider: "magpie",
+        thinking: false,
+      },
+    ]);
+  });
+
+  it("reports an invalid payload", () => {
+    expect(parseMagpieModelList({}).problem).toBe("Magpie 模型列表格式无效");
+    expect(parseMagpieModelList({ data: [] }).problem).toBe("Magpie 未返回任何可用模型");
+    expect(parseMagpieModelList({ data: [{ notAnId: 1 }] }).models).toEqual([]);
   });
 });

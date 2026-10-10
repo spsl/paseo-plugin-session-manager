@@ -15,6 +15,10 @@ export const ANALYZER_SETTINGS = defineSettings({
     systemPrompt: z.string().default(""),
     /** Executable override; empty means resolve the agent CLI from PATH. */
     command: z.string().default(""),
+    /** Magpie's OpenAI-compatible base URL; empty means the default local proxy. */
+    magpieBaseUrl: z.string().default(""),
+    /** Optional bearer token for Magpie; the local proxy does not require one. */
+    magpieApiKey: z.string().default(""),
     concurrency: z.number().int().min(1).max(4).default(2),
     timeoutSeconds: z.number().int().min(30).max(600).default(120),
     writeBackTitle: z.boolean().default(false),
@@ -36,6 +40,8 @@ export const DEFAULT_ANALYZER_SETTINGS: AnalyzerSettings = {
   thinkingLevel: "low",
   systemPrompt: "",
   command: "",
+    magpieBaseUrl: "",
+    magpieApiKey: "",
   concurrency: 2,
   timeoutSeconds: 120,
   writeBackTitle: false,

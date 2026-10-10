@@ -20,6 +20,11 @@ export function buildAnalyzerInvocation(args: {
   schema: Record<string, unknown>;
 }): AnalyzerInvocation {
   const { config, command, paths, schema } = args;
+  if (config.agent === "magpie") {
+    // Magpie is an HTTP adapter, not a CLI; reaching here means the caller
+    // routed a direct agent through the CLI builder.
+    throw new Error("Magpie 分析器不使用命令行调用");
+  }
   const thinkingArgs = config.thinkingLevel ? effortArgs(config.agent, config.thinkingLevel) : [];
 
   switch (config.agent) {
@@ -97,5 +102,7 @@ function effortArgs(
       return ["--thinking", level];
     case "codex":
       return ["-c", `model_reasoning_effort=${level}`];
+    case "magpie":
+      return [];
   }
 }

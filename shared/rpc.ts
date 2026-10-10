@@ -92,6 +92,18 @@ export const speechVoicesRpc = defineRpc({
   output: z.object({ available: z.boolean(), voices: z.array(SpeechVoiceSchema) }),
 });
 
+/** The Magpie proxy's own model catalog, for the direct analyzer settings. */
+export const magpieModelsRpc = defineRpc({
+  name: "session-manager.magpie.models",
+  input: z.object({}),
+  output: z.object({
+    models: z.array(
+      z.object({ id: z.string(), label: z.string(), provider: z.string(), thinking: z.boolean() }),
+    ),
+    problem: z.string().nullable(),
+  }),
+});
+
 /** The Pi CLI's own model catalog, so the analyzer settings can offer real ids. */
 export const piModelsRpc = defineRpc({
   name: "session-manager.pi.models",

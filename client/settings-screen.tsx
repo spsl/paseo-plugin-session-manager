@@ -21,6 +21,7 @@ import {
 } from "../shared/analysis-config";
 import { ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/settings";
 import {
+  magpieModelsRpc,
   piModelsRpc,
   speechVoicesRpc,
   testAnalyzerRpc,
@@ -33,6 +34,7 @@ import {
   type SpeechVoice,
 } from "../shared/speech";
 import { getAnnouncer, isMutedHere, mirrorSettings, setMutedHere } from "./announcer";
+import { ModelPicker } from "./model-picker";
 import { PromptEditor } from "./prompt-editor";
 import { errorText } from "./styles";
 
@@ -147,16 +149,37 @@ function TextCommitInput(props: {
 
 const TEST_SENTENCE = "会话看板：这是一条测试语音，之后的播报会像这样。";
 
+/** Agents whose model catalog is discovered at runtime rather than seeded. */
+const LIVE_CATALOG_AGENTS = ["pi", "magpie"] as const;
+type LiveCatalogAgent = (typeof LIVE_CATALOG_AGENTS)[number];
+
+function isLiveCatalogAgent(agent: AnalyzerAgent): agent is LiveCatalogAgent {
+  return (LIVE_CATALOG_AGENTS as readonly string[]).includes(agent);
+}
+
+type LiveCatalogState = {
+  options: { label: string; value: string }[];
+  thinking: Record<string, boolean>;
+  problem: string | null;
+  /** True once a fetch succeeded; failures stay false so they can be retried. */
+  loaded: boolean;
+};
+
+function emptyLiveCatalog(): LiveCatalogState {
+  return { options: [], thinking: {}, problem: null, loaded: false };
+}
+
 /**
- * Pi reports whether a model does reasoning at all; when it does not, no effort
- * flag is offered (pi would reject `--thinking`). Unknown ids assume yes.
+ * Both live sources report whether a model does reasoning at all; when it does
+ * not, no effort flag is offered (pi would reject `--thinking`). Unknown ids
+ * assume yes so a hand-typed model keeps the generic options.
  */
-function piSupportsThinkingFor(
+function supportsThinkingFor(
   agent: AnalyzerAgent,
   model: string,
   thinking: Record<string, boolean>,
 ): boolean {
-  if (agent !== "pi") {
+  if (!isLiveCatalogAgent(agent)) {
     return true;
   }
   return thinking[model] !== false;
@@ -394,14 +417,17 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
   const settings = useSettings(ANALYZER_SETTINGS);
   const runTest = useRpc(testAnalyzerRpc);
   const loadPiModels = useRpc(piModelsRpc);
+  const loadMagpieModels = useRpc(magpieModelsRpc);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [piModels, setPiModels] = useState<{
-    options: { label: string; value: string }[];
-    thinking: Record<string, boolean>;
-    problem: string | null;
-    loaded: boolean;
-  }>({ options: [], thinking: {}, problem: null, loaded: false });
+  /**
+   * Catalog for agents whose models can only be discovered at runtime, cached
+   * per agent. A failed fetch is not latched, so switching back retries.
+   */
+  const [liveCatalog, setLiveCatalog] = useState<Record<LiveCatalogAgent, LiveCatalogState>>({
+    pi: emptyLiveCatalog(),
+    magpie: emptyLiveCatalog(),
+  });
   // Bumped when the model select changes so the free-input remounts with the new value.
   const [modelEpoch, setModelEpoch] = useState(0);
 
@@ -455,59 +481,97 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
   const modelOptions = getAnalyzerModelOptions(config.agent).map(function toOption(option) {
     return { label: option.label, value: option.id };
   });
-  // Pi's catalog comes from the CLI itself; the shared seed stays for the others.
-  if (config.agent === "pi" && piModels.options.length > 0) {
+  // Only a live agent's own catalog replaces the seeded options.
+  const catalog = isLiveCatalogAgent(config.agent)
+    ? liveCatalog[config.agent]
+    : emptyLiveCatalog();
+  // Pi's catalog comes from its CLI, Magpie's from the local proxy; the shared
+  // seed still serves Codex and Claude.
+  if (catalog.options.length > 0) {
     modelOptions.length = 0;
-    modelOptions.push(...piModels.options);
+    modelOptions.push(...catalog.options);
   }
   if (!modelOptions.some((option) => option.value === config.model)) {
     modelOptions.unshift({ label: `${config.model}（自定义）`, value: config.model });
   }
-  // Pi reports per-model reasoning support, which outranks the generic table.
-  const piSupportsThinking = piSupportsThinkingFor(config.agent, config.model, piModels.thinking);
-  const thinkingOptions = piSupportsThinking
-    ? []
-    : getThinkingLevelOptions(config.agent, config.model);
+  const thinkingOptions = supportsThinkingFor(config.agent, config.model, catalog.thinking)
+    ? getThinkingLevelOptions(config.agent, config.model)
+    : [];
   const modelHint =
-    config.agent === "pi"
-      ? piModels.problem === null
-        ? "来自本机 pi CLI 的模型目录。"
-        : `pi 模型目录不可用：${piModels.problem}；仍可在下方填写模型 ID。`
+    isLiveCatalogAgent(config.agent)
+      ? catalog.problem === null
+        ? config.agent === "magpie"
+          ? "来自本机 Magpie 代理的模型目录。"
+          : "来自本机 pi CLI 的模型目录。"
+        : `${catalog.problem}；仍可在下方填写模型 ID。`
       : "列表之外的模型可以在下方填写模型 ID。";
 
-  // Pi has no fixed catalog: the ids live in the user's own CLI config, so the
-  // daemon asks the CLI once per agent switch instead of shipping a stale seed.
+  // Neither Pi nor Magpie has a fixed catalog: the ids live in the user's own
+  // CLI config and proxy, so the daemon is asked once per agent switch. The
+  // in-flight set lives outside state so a re-render cannot drop a fetch.
+  const requestedRef = useRef<Set<LiveCatalogAgent>>(new Set());
+  // Unmount-only cancellation: cancelling on every effect re-run would drop a
+  // result that lands while the effect's own state update re-runs it.
+  const mountedRef = useRef(true);
   useEffect(
-    function loadPiModelCatalog() {
-      if (config.agent !== "pi" || piModels.loaded) {
+    function loadLiveModelCatalog() {
+      if (!isLiveCatalogAgent(config.agent) || catalog.loaded) {
         return;
       }
-      let cancelled = false;
-      setPiModels((state) => ({ ...state, loaded: true }));
-      loadPiModels({})
+      // Bound once so the closure below indexes a concrete agent key.
+      const agent: LiveCatalogAgent = config.agent;
+      if (requestedRef.current.has(agent)) {
+        return;
+      }
+      requestedRef.current.add(agent);
+      // Marked loading only for this agent; a failure leaves it retryable.
+      setLiveCatalog((state) => ({ ...state, [agent]: { ...state[agent], loaded: true } }));
+      const request = agent === "magpie" ? loadMagpieModels({}) : loadPiModels({});
+      request
         .then(function done(result) {
-          if (cancelled) return;
+          if (!mountedRef.current) return;
+          requestedRef.current.delete(agent);
           const thinking: Record<string, boolean> = {};
           const options = result.models.map(function toOption(model) {
             thinking[model.id] = model.thinking;
-            return { label: `${model.provider} · ${model.label}`, value: model.id };
+            // The id is already provider-qualified for Pi; repeating the
+            // provider only pushed the useful part out of the row.
+            return { label: model.label, value: model.id };
           });
-          setPiModels({ options, thinking, problem: result.problem, loaded: true });
+          setLiveCatalog((state) => ({
+            ...state,
+            [agent]: { options, thinking, problem: result.problem, loaded: true },
+          }));
         })
         .catch(function failed() {
-          if (cancelled) return;
-          setPiModels({
-            options: [],
-            thinking: {},
-            problem: "无法读取 pi 模型列表",
-            loaded: true,
-          });
+          if (!mountedRef.current) return;
+          requestedRef.current.delete(agent);
+          const what = agent === "magpie" ? "Magpie" : "pi";
+          setLiveCatalog((state) => ({
+            ...state,
+            [agent]: {
+              ...emptyLiveCatalog(),
+              problem: `无法读取${what}模型列表`,
+              loaded: false,
+            },
+          }));
         });
-      return function cancel() {
-        cancelled = true;
+      // No cleanup: the request must survive the state update it triggers.
+      return;
+    },
+    // Only the agent matters. `catalog.loaded` is read but not depended on, so
+    // the effect cannot re-run because of its own state update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [config.agent, loadMagpieModels, loadPiModels],
+  );
+  useEffect(
+    function trackMounted() {
+      mountedRef.current = true;
+      return function markUnmounted() {
+        mountedRef.current = false;
       };
     },
-    [config.agent, loadPiModels, piModels.loaded],
+    [],
   );
 
   return (
@@ -550,13 +614,17 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               if (!isAnalyzerAgent(value) || value === config.agent) return;
               const next = getDefaultAnalysisConfig(value);
               setModelEpoch((epoch) => epoch + 1);
-              // A Pi catalog that is already loaded replaces the "default" seed,
-              // which would otherwise silently hand the choice back to the CLI.
+              // A loaded live catalog replaces the seed, which would otherwise
+              // hand the choice back to a CLI default the user never picked.
               const model =
-                value === "pi" && piModels.options.length > 0
-                  ? (piModels.options[0]?.value ?? next.model)
+                isLiveCatalogAgent(value) && liveCatalog[value].options.length > 0
+                  ? (liveCatalog[value].options[0]?.value ?? next.model)
                   : next.model;
-              const options = piSupportsThinkingFor(value, model, piModels.thinking)
+              const options = supportsThinkingFor(
+                value,
+                model,
+                isLiveCatalogAgent(value) ? liveCatalog[value].thinking : {},
+              )
                 ? getThinkingLevelOptions(value, model)
                 : [];
               void save({
@@ -566,25 +634,50 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               });
             }}
           />
-          <SettingsSelect<string>
-            label="模型"
-            value={config.model}
-            options={modelOptions}
-            disabled={disabled}
-            onValueChange={function change(value) {
-              // A Pi model without reasoning support must not keep an effort.
-              const options = piSupportsThinkingFor(config.agent, value, piModels.thinking)
-                ? []
-                : getThinkingLevelOptions(config.agent, value);
-              const keep = options.some((option) => option.id === config.thinkingLevel);
-              const fallback = options.find((option) => option.id === "low") ?? options[0];
-              setModelEpoch((epoch) => epoch + 1);
-              void save({
-                model: value,
-                thinkingLevel: keep ? (config.thinkingLevel ?? "") : (fallback?.id ?? ""),
-              });
-            }}
-          />
+          {catalog.options.length > 0 ? (
+            <ModelPicker
+              label="模型"
+              hint={modelHint}
+              value={config.model}
+              options={catalog.options}
+              disabled={disabled}
+              theme={theme}
+              compact={layout.compact}
+              onSelect={function change(value) {
+                // A model without reasoning support must not keep an effort.
+                const options = supportsThinkingFor(config.agent, value, catalog.thinking)
+                  ? []
+                  : getThinkingLevelOptions(config.agent, value);
+                const keep = options.some((option) => option.id === config.thinkingLevel);
+                const fallback = options.find((option) => option.id === "low") ?? options[0];
+                setModelEpoch((epoch) => epoch + 1);
+                void save({
+                  model: value,
+                  thinkingLevel: keep ? (config.thinkingLevel ?? "") : (fallback?.id ?? ""),
+                });
+              }}
+            />
+          ) : (
+            <SettingsSelect<string>
+              label="模型"
+              value={config.model}
+              options={modelOptions}
+              disabled={disabled}
+              onValueChange={function change(value) {
+                // A model without reasoning support must not keep an effort.
+                const options = supportsThinkingFor(config.agent, value, catalog.thinking)
+                  ? []
+                  : getThinkingLevelOptions(config.agent, value);
+                const keep = options.some((option) => option.id === config.thinkingLevel);
+                const fallback = options.find((option) => option.id === "low") ?? options[0];
+                setModelEpoch((epoch) => epoch + 1);
+                void save({
+                  model: value,
+                  thinkingLevel: keep ? (config.thinkingLevel ?? "") : (fallback?.id ?? ""),
+                });
+              }}
+            />
+          )}
           <TextCommitInput
             key={`model-${config.agent}-${modelEpoch}`}
             label="自定义模型 ID"
@@ -610,16 +703,41 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               }}
             />
           ) : null}
-          <TextCommitInput
-            label="可执行文件路径"
-            hint="留空则从 PATH 中查找所选分析器。"
-            placeholder="例如 /opt/homebrew/bin/codex"
-            initialValue={values?.command ?? ""}
-            disabled={disabled}
-            onCommit={function commit(value) {
-              void save({ command: value });
-            }}
-          />
+          {config.agent === "magpie" ? (
+            <>
+              <TextCommitInput
+                label="Magpie 地址"
+                hint="本机 Magpie 代理的 OpenAI 兼容地址；留空使用默认的 http://127.0.0.1:3425/v1。"
+                placeholder="http://127.0.0.1:3425/v1"
+                initialValue={values?.magpieBaseUrl ?? ""}
+                disabled={disabled}
+                onCommit={function commit(value) {
+                  void save({ magpieBaseUrl: value });
+                }}
+              />
+              <TextCommitInput
+                label="Magpie API Key"
+                hint="本机代理通常不需要；留空即可。"
+                placeholder="sk-..."
+                initialValue={values?.magpieApiKey ?? ""}
+                disabled={disabled}
+                onCommit={function commit(value) {
+                  void save({ magpieApiKey: value });
+                }}
+              />
+            </>
+          ) : (
+            <TextCommitInput
+              label="可执行文件路径"
+              hint="留空则从 PATH 中查找所选分析器。"
+              placeholder="例如 /opt/homebrew/bin/codex"
+              initialValue={values?.command ?? ""}
+              disabled={disabled}
+              onCommit={function commit(value) {
+                void save({ command: value });
+              }}
+            />
+          )}
           <SettingsSelect<string>
             label="并发数"
             value={String(values?.concurrency ?? 2)}

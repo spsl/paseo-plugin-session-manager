@@ -5,6 +5,7 @@ import {
   clearManualStatusRpc,
   detailRpc,
   forgetRpc,
+  magpieModelsRpc,
   reanalyzeRpc,
   piModelsRpc,
   setManualStatusRpc,
@@ -15,7 +16,8 @@ import {
   testAnalyzerRpc,
 } from "../shared/rpc";
 import type { AnnouncementFeed } from "./announcements";
-import { listPiModels } from "./pi-models";
+import { DEFAULT_MAGPIE_BASE_URL } from "./analyzer/magpie";
+import { listMagpieModels, listPiModels } from "./pi-models";
 import { listSayVoices, renderWithSay, sayAvailable } from "./say";
 import { stopAgentViaCli } from "./stop-agent";
 import type { SessionManagerService } from "./service";
@@ -85,5 +87,9 @@ export function registerRpcHandlers(
   server.handle(piModelsRpc, async () => {
     const settings = await service.currentAnalyzerSettings();
     return listPiModels(settings.command);
+  });
+  server.handle(magpieModelsRpc, async () => {
+    const settings = await service.currentAnalyzerSettings();
+    return listMagpieModels(settings.magpieBaseUrl.trim() || DEFAULT_MAGPIE_BASE_URL);
   });
 }
