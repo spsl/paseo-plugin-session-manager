@@ -5,7 +5,8 @@ import { copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { memo, useMemo, type ReactNode } from "react";
 import { Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { withAlpha } from "../styles";
-import { parseMarkdown, type Align, type Block, type Inline } from "./parse";
+import { MermaidBlock } from "./mermaid-block";
+import { parseMarkdown, tableColumnUnits, type Align, type Block, type Inline } from "./parse";
 
 const MONO = Platform.select({
   ios: "Menlo",
@@ -176,6 +177,10 @@ function cellAlign(align: Align): "left" | "right" | "center" {
   return align ?? "left";
 }
 
+const COL_MIN = 80;
+const COL_MAX = 280;
+const COL_CHROME = 17; // paddingHorizontal 8*2 + borderRight 1
+
 function TableBlock(props: {
   ctx: Ctx;
   align: Align[];
@@ -184,6 +189,9 @@ function TableBlock(props: {
 }) {
   const { ctx } = props;
   const { colors } = ctx.theme;
+  const widths = tableColumnUnits(props.header, props.rows).map(function toWidth(u) {
+    return Math.max(COL_MIN, Math.min(COL_MAX, Math.ceil(u * ctx.fontSize) + COL_CHROME));
+  });
   const renderRow = function renderRow(cells: Inline[][], head: boolean, rowIndex: number) {
     return (
       <View
@@ -198,8 +206,7 @@ function TableBlock(props: {
             <View
               key={c}
               style={{
-                minWidth: 80,
-                maxWidth: 280,
+                width: widths[c] ?? COL_MIN,
                 paddingHorizontal: 8,
                 paddingVertical: 5,
                 borderRightWidth: c < cells.length - 1 ? 1 : 0,
@@ -271,6 +278,9 @@ function BlockView(props: { block: Block; ctx: Ctx }) {
     case "paragraph":
       return <InlineText nodes={block.inline} ctx={ctx} />;
     case "code":
+      if (block.closed && block.lang.trim().toLowerCase() === "mermaid") {
+        return <MermaidBlock theme={ctx.theme} code={block.text} />;
+      }
       return <CodeBlock ctx={ctx} lang={block.lang} text={block.text} />;
     case "hr":
       return <View style={{ height: 1, backgroundColor: colors.border, marginVertical: 4 }} />;

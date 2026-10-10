@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { inlineToText, parseInline, parseMarkdown, type Block } from "./parse";
+import {
+  inlineToText,
+  inlineUnits,
+  parseInline,
+  parseMarkdown,
+  tableColumnUnits,
+  type Block,
+} from "./parse";
 
 function first(text: string): Block {
   return parseMarkdown(text)[0];
@@ -15,12 +22,20 @@ describe("blocks", () => {
     expect(blocks.map((b) => b.type)).toEqual(["paragraph", "paragraph"]);
   });
   it("parses fenced code with language", () => {
-    expect(first("```ts\nconst a = 1;\n```")).toEqual({ type: "code", lang: "ts", text: "const a = 1;" });
-    expect(first("~~~\nx\n~~~")).toEqual({ type: "code", lang: "", text: "x" });
+    expect(first("```ts\nconst a = 1;\n```")).toEqual({
+      type: "code",
+      lang: "ts",
+      text: "const a = 1;",
+      closed: true,
+    });
+    expect(first("~~~\nx\n~~~")).toEqual({ type: "code", lang: "", text: "x", closed: true });
   });
   it("treats an unclosed fence as code to the end", () => {
     const blocks = parseMarkdown("intro\n```py\nprint(1)\n\nmore");
-    expect(blocks[1]).toEqual({ type: "code", lang: "py", text: "print(1)\n\nmore" });
+    expect(blocks[1]).toEqual({ type: "code", lang: "py", text: "print(1)\n\nmore", closed: false });
+  });
+  it("marks a bare opening fence as unclosed", () => {
+    expect(first("```mermaid")).toEqual({ type: "code", lang: "mermaid", text: "", closed: false });
   });
   it("parses blockquotes with nested content", () => {
     const b = first("> # hi\n> - a\n> - b");
@@ -40,7 +55,7 @@ describe("blocks", () => {
     if (b.type === "list") {
       expect(b.items).toHaveLength(2);
       expect(b.items[0].children.map((c) => c.type)).toEqual(["paragraph", "list"]);
-      expect(b.items[1].children[1]).toEqual({ type: "code", lang: "js", text: "x()" });
+      expect(b.items[1].children[1]).toEqual({ type: "code", lang: "js", text: "x()", closed: true });
     }
   });
   it("parses list in blockquote", () => {
@@ -60,6 +75,19 @@ describe("blocks", () => {
     expect(b.rows).toHaveLength(2);
     expect(inlineToText(b.header[0])).toBe("a");
     expect(b.rows[1][2]).toEqual([]);
+  });
+  it("sizes table columns by the widest cell in each column", () => {
+    const b = first("| a | 长列标题 |\n|---|---|\n| x | y |\n| wwwwwwwwww | z |");
+    if (b.type !== "table") throw new Error("not table");
+    const units = tableColumnUnits(b.header, b.rows);
+    expect(units).toHaveLength(2);
+    expect(units[0]).toBeCloseTo(10 * 0.55, 5);
+    expect(units[1]).toBeCloseTo(4 * 1.08, 5);
+    expect(tableColumnUnits([], [])).toEqual([]);
+  });
+  it("estimates CJK text wider than ASCII", () => {
+    expect(inlineUnits(parseInline("汉字"))).toBeCloseTo(2, 5);
+    expect(inlineUnits(parseInline("ab"))).toBeCloseTo(1.1, 5);
   });
   it("parses thematic breaks", () => {
     expect(parseMarkdown("---\n***\n___").map((b) => b.type)).toEqual(["hr", "hr", "hr"]);

@@ -23,7 +23,7 @@ const analysis = (status: "completed" | "blocked" | "waiting_for_user" | "unclea
 describe("projectView", () => {
   it("defaults to unclear", () => {
     const view = projectView(record());
-    expect(view).toMatchObject({ effectiveStatus: "unclear", column: "unclear", draggable: true, needsAttention: false });
+    expect(view).toMatchObject({ effectiveStatus: "unclear", column: "unclear", needsAttention: false });
   });
 
   it("manual override beats everything while live", () => {
@@ -48,11 +48,11 @@ describe("projectView", () => {
     expect(view).toMatchObject({ effectiveStatus: "blocked", column: "waiting_for_user", needsAttention: true, modelStatus: "blocked" });
   });
 
-  it("non-live sessions are closed, not draggable and need no attention", () => {
+  it("non-live sessions are closed and need no attention", () => {
     const view = projectView(
       record({ liveness: "closed", manualStatusOverride: "completed", pendingPermissionCount: 2, analysis: analysis("waiting_for_user") }),
     );
-    expect(view).toMatchObject({ column: "closed", draggable: false, needsAttention: false, effectiveStatus: "waiting_for_user" });
+    expect(view).toMatchObject({ column: "closed", needsAttention: false, effectiveStatus: "waiting_for_user" });
   });
 
   it("exposes turn count and the first line of the last user input", () => {

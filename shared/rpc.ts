@@ -116,6 +116,19 @@ export const piModelsRpc = defineRpc({
   }),
 });
 
+/** Server-side mermaid → PNG render; the client draws it with RN <Image>. */
+export const mermaidRenderRpc = defineRpc({
+  name: "session-manager.mermaid.render",
+  input: z.object({
+    code: z.string().min(1),
+    theme: z.enum(["light", "dark"]).default("light"),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), png: z.string(), width: z.number(), height: z.number() }),
+    z.object({ ok: z.literal(false), error: z.string() }),
+  ]),
+});
+
 export const speechRenderRpc = defineRpc({
   name: "session-manager.speech.render",
   input: z.object({

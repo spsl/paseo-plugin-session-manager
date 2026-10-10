@@ -32,7 +32,6 @@ export type SessionRecord = Omit<
   | "effectiveStatus"
   | "column"
   | "needsAttention"
-  | "draggable"
 > & {
   turns: Turn[];
   firstUserMessage: string | null;

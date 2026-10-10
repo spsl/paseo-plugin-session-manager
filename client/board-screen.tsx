@@ -1,7 +1,7 @@
 import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Animated, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { COLUMNS } from "../shared/presentation";
 import { ANALYZER_SETTINGS, DEFAULT_ANALYZER_SETTINGS } from "../shared/settings";
 import {
@@ -9,18 +9,16 @@ import {
   filterSessionsByProject,
   retainAvailableProjectSelection,
 } from "../shared/project-filter";
-import type { AnalysisStatus, BoardColumn, SessionView } from "../shared/types";
+import type { BoardColumn, SessionView } from "../shared/types";
 import { isDesktop, isFullscreen, setFullscreen } from "./desktop-bridge";
 import { FALLBACK_HINT, NOTICE_NO_WINDOW, openBoardInNewWindow } from "./open-board-window";
 import { useSnapshotNudges } from "./agents-watch";
 import { Chip } from "./badge";
 import { groupByColumn } from "./board-model";
 import { SingleColumn, WideColumns } from "./board-columns";
-import { SessionCard } from "./session-card";
 import { SessionOverlay } from "./session-overlay";
 import { columnTone, errorText } from "./styles";
-import { useBoardDrag } from "./use-board-drag";
-import { useSessionActions, useSnapshot } from "./use-snapshot";
+import { useSnapshot } from "./use-snapshot";
 
 /**
  * A screen is given no way to open a settings screen, so index.client.tsx lends
@@ -61,7 +59,6 @@ export function BoardScreen(props: PluginScreenProps) {
     settings.status === "ready"
       ? settings.values.columnWidthPercent
       : DEFAULT_ANALYZER_SETTINGS.columnWidthPercent;
-  const actions = useSessionActions();
   const now = useNow(30_000);
   useSnapshotNudges();
 
@@ -160,20 +157,6 @@ export function BoardScreen(props: PluginScreenProps) {
     [sessions],
   );
 
-  const onDrop = useCallback(
-    function onDrop(session: SessionView, status: AnalysisStatus) {
-      void actions.setManualStatus(session.id, status);
-    },
-    [actions],
-  );
-  const onReject = useCallback(
-    function onReject(message: string) {
-      toast.show(message, { variant: "warning" });
-    },
-    [toast],
-  );
-  const drag = useBoardDrag({ enabled: !compact, onDrop, onReject });
-
   const onOpen = useCallback(function open(session: SessionView) {
     setOpenId(session.id);
   }, []);
@@ -189,10 +172,12 @@ export function BoardScreen(props: PluginScreenProps) {
   }
 
   const total = allSessions.length;
+  const openTotal = filter.options.reduce(function sum(total, option) {
+    return total + option.openCount;
+  }, 0);
   const countLabel =
     selected.size === 0 ? `${total} 个会话` : `${sessions.length} / ${total} 个会话`;
   const problem = snapshot.data?.analyzer.problem ?? null;
-  const dragApi = compact ? null : drag;
 
   let body;
   if (snapshot.data === undefined && snapshot.isError) {
@@ -246,7 +231,6 @@ export function BoardScreen(props: PluginScreenProps) {
           theme={theme}
           now={now}
           groups={groups}
-          drag={null}
           onOpen={onOpen}
           columnId={activeColumn}
         />
@@ -258,7 +242,6 @@ export function BoardScreen(props: PluginScreenProps) {
         theme={theme}
         now={now}
         groups={groups}
-        drag={dragApi}
         onOpen={onOpen}
         columnWidthPercent={columnWidthPercent}
       />
@@ -266,12 +249,7 @@ export function BoardScreen(props: PluginScreenProps) {
   }
 
   return (
-    <View
-      ref={drag.rootRef}
-      collapsable={false}
-      style={{ flex: 1, backgroundColor: colors.surface0 }}
-      {...(compact ? {} : drag.panHandlers)}
-    >
+    <View style={{ flex: 1, backgroundColor: colors.surface0 }}>
       <View
         style={{
           flexDirection: "row",
@@ -356,7 +334,7 @@ export function BoardScreen(props: PluginScreenProps) {
         >
           <Chip
             theme={theme}
-            label={`全部项目（${total}）`}
+            label={`全部项目（${openTotal}）`}
             selected={selected.size === 0}
             onPress={function clear() {
               setSelected(new Set());
@@ -367,7 +345,7 @@ export function BoardScreen(props: PluginScreenProps) {
               <Chip
                 key={option.key}
                 theme={theme}
-                label={`${option.label}（${option.count}）`}
+                label={`${option.label}（${option.openCount}）`}
                 selected={selected.has(option.key)}
                 onPress={function toggle() {
                   toggleProject(option.key);
@@ -379,24 +357,6 @@ export function BoardScreen(props: PluginScreenProps) {
       ) : null}
 
       <View style={{ flex: 1, minHeight: 0 }}>{body}</View>
-
-      {drag.active ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            {
-              position: "absolute",
-              width: drag.active.width,
-              opacity: 0.9,
-              zIndex: 1000,
-              elevation: 12,
-            },
-            drag.ghost.getLayout(),
-          ]}
-        >
-          <SessionCard session={drag.active.session} theme={theme} now={now} draggable={false} ghost />
-        </Animated.View>
-      ) : null}
 
       <SessionOverlay
         sessionId={openId}

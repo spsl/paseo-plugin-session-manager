@@ -12,7 +12,7 @@ import { analysisStatusLabel, sessionTitle } from "../shared/presentation";
 import type { SessionDetail } from "../shared/types";
 import { Badge, Chip } from "./badge";
 import { ConversationPane } from "./conversation/conversation-pane";
-import { DetailContent } from "./detail-content";
+import { DetailContent, useDetailActions } from "./detail-content";
 import { columnTone, errorText, statusTone } from "./styles";
 import { useDetail } from "./use-snapshot";
 
@@ -60,14 +60,7 @@ export function SessionOverlay(props: Props) {
     );
   } else {
     body = (
-      <OverlayBody
-        key={session.id}
-        session={session}
-        theme={theme}
-        compact={compact}
-        navigation={props.navigation}
-        onClose={onClose}
-      />
+      <OverlayBody key={session.id} session={session} theme={theme} compact={compact} />
     );
   }
 
@@ -131,6 +124,15 @@ export function SessionOverlay(props: Props) {
               </Text>
             ) : null}
           </View>
+          {session ? (
+            <HeaderActions
+              key={session.id}
+              session={session}
+              theme={theme}
+              navigation={props.navigation}
+              onClose={onClose}
+            />
+          ) : null}
           {session ? <HeaderBadges session={session} theme={theme} /> : null}
           <Pressable
             accessibilityRole="button"
@@ -144,6 +146,77 @@ export function SessionOverlay(props: Props) {
         </View>
         <View style={{ flex: 1, minHeight: 0 }}>{body}</View>
       </View>
+    </View>
+  );
+}
+
+function HeaderIconButton(props: {
+  theme: PluginTheme;
+  icon: string;
+  label: string;
+  onPress(): void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  const { colors } = props.theme;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.label}
+      hitSlop={4}
+      disabled={props.disabled === true}
+      onPress={props.onPress}
+      style={{ padding: 6, borderRadius: 6, opacity: props.disabled === true ? 0.4 : 1 }}
+    >
+      <Icon
+        name={props.icon}
+        size={16}
+        color={props.danger === true ? colors.statusDanger : colors.foregroundMuted}
+      />
+    </Pressable>
+  );
+}
+
+function HeaderActions(props: {
+  session: SessionDetail;
+  theme: PluginTheme;
+  navigation: PluginScreenProps["navigation"];
+  onClose(): void;
+}) {
+  const { theme } = props;
+  const act = useDetailActions({
+    session: props.session,
+    navigation: props.navigation,
+    onClose: props.onClose,
+  });
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+      {act.openAgent ? (
+        <HeaderIconButton theme={theme} icon="ExternalLink" label="打开 Agent" onPress={act.openAgent} />
+      ) : null}
+      <HeaderIconButton
+        theme={theme}
+        icon="RefreshCw"
+        label="重新分析"
+        disabled={act.reanalyzeDisabled}
+        onPress={act.reanalyze}
+      />
+      {act.applyGeneratedTitle ? (
+        <HeaderIconButton theme={theme} icon="Sparkles" label="应用生成标题" onPress={act.applyGeneratedTitle} />
+      ) : null}
+      {act.archiveSession ? (
+        <HeaderIconButton
+          theme={theme}
+          icon={act.archiveConfirming ? "ArchiveX" : "Archive"}
+          label={act.archiveConfirming ? "再次点击确认归档" : "归档"}
+          danger={act.archiveConfirming}
+          disabled={act.archiveBusy}
+          onPress={act.archiveSession}
+        />
+      ) : null}
+      {act.forgetSession ? (
+        <HeaderIconButton theme={theme} icon="EyeOff" label="从看板移除" onPress={act.forgetSession} />
+      ) : null}
     </View>
   );
 }
@@ -165,13 +238,7 @@ function HeaderBadges(props: { session: SessionDetail; theme: PluginTheme }) {
   );
 }
 
-function OverlayBody(props: {
-  session: SessionDetail;
-  theme: PluginTheme;
-  compact: boolean;
-  navigation: PluginScreenProps["navigation"];
-  onClose(): void;
-}) {
+function OverlayBody(props: { session: SessionDetail; theme: PluginTheme; compact: boolean }) {
   const { session, theme, compact } = props;
   const live = session.liveness === "live";
   const [tab, setTab] = useState<Tab>(live ? "conversation" : "overview");
@@ -182,12 +249,7 @@ function OverlayBody(props: {
       contentContainerStyle={{ padding: 14, gap: 16 }}
       keyboardShouldPersistTaps="handled"
     >
-      <DetailContent
-        session={session}
-        theme={theme}
-        navigation={props.navigation}
-        onClose={props.onClose}
-      />
+      <DetailContent session={session} theme={theme} />
     </ScrollView>
   );
   const conversation = <ConversationPane sessionId={session.id} theme={theme} live={live} />;

@@ -144,8 +144,6 @@ export const SessionViewSchema = z.object({
   effectiveStatus: AnalysisStatusSchema,
   column: BoardColumnSchema,
   needsAttention: z.boolean(),
-  /** True when the card may be dragged to another column (live sessions only). */
-  draggable: z.boolean(),
 });
 export type SessionView = z.infer<typeof SessionViewSchema>;
 

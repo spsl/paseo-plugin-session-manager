@@ -149,6 +149,6 @@ export function columnWidthFor(
     return null;
   }
   const fill = (containerWidth - BOARD_PADDING * 2 - BOARD_GAP * (columnCount - 1)) / columnCount;
-  const clamped = Math.min(100, Math.max(1, percent));
+  const clamped = Math.min(500, Math.max(1, percent));
   return Math.max(MIN_COLUMN_WIDTH, Math.floor((fill * clamped) / 100));
 }

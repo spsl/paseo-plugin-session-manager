@@ -34,7 +34,6 @@ export function makeSession(overrides: Partial<SessionView> = {}): SessionView {
     effectiveStatus: "unclear",
     column: "unclear",
     needsAttention: false,
-    draggable: true,
     ...overrides,
   };
 }

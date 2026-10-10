@@ -6,6 +6,7 @@ import {
   detailRpc,
   forgetRpc,
   magpieModelsRpc,
+  mermaidRenderRpc,
   reanalyzeRpc,
   piModelsRpc,
   setManualStatusRpc,
@@ -17,6 +18,7 @@ import {
 } from "../shared/rpc";
 import type { AnnouncementFeed } from "./announcements";
 import { DEFAULT_MAGPIE_BASE_URL } from "./analyzer/magpie";
+import { renderMermaid } from "./mermaid";
 import { listMagpieModels, listPiModels } from "./pi-models";
 import { listSayVoices, renderWithSay, sayAvailable } from "./say";
 import { stopAgentViaCli } from "./stop-agent";
@@ -41,6 +43,9 @@ export function registerRpcHandlers(
       console.warn("[session-manager] could not list say voices", error);
       return { available: false, voices: [] };
     }
+  });
+  server.handle(mermaidRenderRpc, (input) => {
+    return renderMermaid(input.code, input.theme);
   });
   server.handle(speechRenderRpc, async (input) => {
     if (!(await sayAvailable())) {

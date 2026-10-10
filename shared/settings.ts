@@ -25,7 +25,7 @@ export const ANALYZER_SETTINGS = defineSettings({
     seedAnalyzeLimit: z.number().int().min(0).max(50).default(10),
     closedRetentionDays: z.number().int().min(1).max(90).default(7),
     /** Board column width as a percentage of the width that would fill the screen. */
-    columnWidthPercent: z.number().int().min(30).max(100).default(60),
+    columnWidthPercent: z.number().int().min(30).max(500).default(90),
     /** Comma/whitespace separated label keys (or key=value); matching agents are hidden and never analyzed. */
     excludedLabelKeys: z.string().default("herald.role"),
   }),
@@ -47,6 +47,6 @@ export const DEFAULT_ANALYZER_SETTINGS: AnalyzerSettings = {
   writeBackTitle: false,
   seedAnalyzeLimit: 10,
   closedRetentionDays: 7,
-  columnWidthPercent: 60,
+  columnWidthPercent: 90,
   excludedLabelKeys: "herald.role",
 };

@@ -19,7 +19,7 @@ export interface ListItem {
 export type Block =
   | { type: "heading"; level: number; inline: Inline[] }
   | { type: "paragraph"; inline: Inline[] }
-  | { type: "code"; lang: string; text: string }
+  | { type: "code"; lang: string; text: string; closed: boolean }
   | { type: "quote"; children: Block[] }
   | { type: "list"; ordered: boolean; start: number; items: ListItem[] }
   | { type: "table"; align: Align[]; header: Inline[][]; rows: Inline[][][] }
@@ -431,17 +431,19 @@ function parseBlocks(lines: string[], depth: number): Block[] {
       const fch = marker[0];
       const body: string[] = [];
       const open = indentOf(line);
+      let closed = false;
       i++;
       while (i < lines.length) {
         const t = lines[i].trim();
         if (t.length >= marker.length && t === fch.repeat(t.length)) {
           i++;
+          closed = true;
           break;
         }
         body.push(open > 0 ? lines[i].replace(new RegExp("^ {0," + open + "}"), "") : lines[i]);
         i++;
       }
-      blocks.push({ type: "code", lang: fence[2], text: body.join("\n") });
+      blocks.push({ type: "code", lang: fence[2], text: body.join("\n"), closed });
       continue;
     }
     const heading = HEADING_RE.exec(line);
@@ -578,4 +580,31 @@ export function inlineToText(nodes: Inline[]): string {
     else out += inlineToText(node.children);
   }
   return out;
+}
+
+/** Estimated width in em units of the longest line of inline nodes (CJK ≈ 1em). */
+export function inlineUnits(nodes: Inline[]): number {
+  let max = 0;
+  for (const line of inlineToText(nodes).split("\n")) {
+    let units = 0;
+    for (const ch of line) {
+      units += (ch.codePointAt(0) ?? 0) >= 0x2e80 ? 1 : 0.55;
+    }
+    if (units > max) max = units;
+  }
+  return max;
+}
+
+/** Per-column max content width in em units; header counts slightly wider (bold). */
+export function tableColumnUnits(header: Inline[][], rows: Inline[][][]): number[] {
+  const units = new Array<number>(header.length).fill(0);
+  const scan = function scan(cells: Inline[][], boost: number): void {
+    for (let c = 0; c < units.length; c++) {
+      const u = inlineUnits(cells[c] ?? []) * boost;
+      if (u > units[c]) units[c] = u;
+    }
+  };
+  scan(header, 1.08);
+  for (const row of rows) scan(row, 1);
+  return units;
 }

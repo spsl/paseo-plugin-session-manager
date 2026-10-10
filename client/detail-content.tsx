@@ -72,36 +72,6 @@ function ListBlock(props: { theme: PluginTheme; title: string; items: readonly s
   );
 }
 
-export function ActionButton(props: {
-  theme: PluginTheme;
-  label: string;
-  onPress(): void;
-  disabled?: boolean;
-  tone?: "danger" | "primary";
-}) {
-  const { colors } = props.theme;
-  const primary = props.tone === "primary";
-  const color = props.tone === "danger" ? colors.statusDanger : primary ? colors.accentForeground : colors.foreground;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      disabled={props.disabled === true}
-      onPress={props.onPress}
-      style={{
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: primary ? colors.accent : colors.border,
-        backgroundColor: primary ? colors.accent : colors.surface1,
-        opacity: props.disabled === true ? 0.5 : 1,
-      }}
-    >
-      <Text style={{ color, fontSize: 13 }}>{props.label}</Text>
-    </Pressable>
-  );
-}
-
 function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
   const { colors } = props.theme;
   const { turn } = props;
@@ -148,25 +118,22 @@ function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
   );
 }
 
-export function DetailContent(props: {
+/** Detail actions rendered as header icon buttons; archive keeps its two-step confirm. */
+export function useDetailActions(props: {
   session: SessionDetail;
-  theme: PluginTheme;
   navigation: PluginScreenProps["navigation"];
   onClose(): void;
 }) {
-  const { session, theme, navigation, onClose } = props;
-  const { colors } = theme;
+  const { session, navigation, onClose } = props;
   const actions = useSessionActions();
   const paseo = usePaseo();
   const toast = useToast();
   const queryClient = useQueryClient();
-  const [showTurns, setShowTurns] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const live = session.liveness === "live";
   const analysis = session.analysis;
-  const turns = [...session.turns].reverse();
   const canApplyTitle =
     analysis !== null &&
     analysis.title.trim() !== "" &&
@@ -175,6 +142,7 @@ export function DetailContent(props: {
   async function archive(): Promise<void> {
     if (!confirmArchive) {
       setConfirmArchive(true);
+      toast.show("再次点击归档图标确认", { variant: "warning" });
       return;
     }
     setBusy(true);
@@ -195,6 +163,44 @@ export function DetailContent(props: {
     const ok = await actions.forget(session.id);
     if (ok) onClose();
   }
+
+  return {
+    live,
+    openAgent: navigation
+      ? function open() {
+          navigation.openAgent({ agentId: session.id });
+          onClose();
+        }
+      : null,
+    reanalyze: function reanalyze() {
+      void actions.reanalyze(session.id);
+    },
+    reanalyzeDisabled: session.analysisState === "queued" || session.analysisState === "running",
+    applyGeneratedTitle: canApplyTitle
+      ? function apply() {
+          void actions.applyGeneratedTitle(session.id);
+        }
+      : null,
+    archiveSession: live ? archive : null,
+    archiveConfirming: confirmArchive,
+    archiveBusy: busy,
+    forgetSession: live
+      ? null
+      : function onForget() {
+          void forget();
+        },
+  };
+}
+
+export function DetailContent(props: { session: SessionDetail; theme: PluginTheme }) {
+  const { session, theme } = props;
+  const { colors } = theme;
+  const actions = useSessionActions();
+  const [showTurns, setShowTurns] = useState(false);
+
+  const live = session.liveness === "live";
+  const analysis = session.analysis;
+  const turns = [...session.turns].reverse();
 
   const statusColumn = columnForStatus(session.effectiveStatus);
   const metadata: [string, string][] = [
@@ -336,59 +342,6 @@ export function DetailContent(props: {
             </View>
           )
         ) : null}
-      </Section>
-
-      <Section theme={theme} title="操作">
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          {navigation ? (
-            <ActionButton
-              theme={theme}
-              label="打开 Agent"
-              tone="primary"
-              onPress={function open() {
-                navigation.openAgent({ agentId: session.id });
-                onClose();
-              }}
-            />
-          ) : null}
-          <ActionButton
-            theme={theme}
-            label="重新分析"
-            disabled={session.analysisState === "queued" || session.analysisState === "running"}
-            onPress={function reanalyze() {
-              void actions.reanalyze(session.id);
-            }}
-          />
-          {canApplyTitle ? (
-            <ActionButton
-              theme={theme}
-              label="应用生成标题"
-              onPress={function apply() {
-                void actions.applyGeneratedTitle(session.id);
-              }}
-            />
-          ) : null}
-          {live ? (
-            <ActionButton
-              theme={theme}
-              tone="danger"
-              label={confirmArchive ? "再次点击确认归档" : "归档"}
-              disabled={busy}
-              onPress={function onArchive() {
-                void archive();
-              }}
-            />
-          ) : (
-            <ActionButton
-              theme={theme}
-              tone="danger"
-              label="从看板移除"
-              onPress={function onForget() {
-                void forget();
-              }}
-            />
-          )}
-        </View>
       </Section>
     </>
   );

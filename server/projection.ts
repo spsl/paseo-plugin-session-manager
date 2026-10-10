@@ -54,7 +54,6 @@ export function projectView(record: SessionRecord): SessionView {
     effectiveStatus,
     column,
     needsAttention: live && (column === "waiting_for_user" || record.pendingPermissionCount > 0),
-    draggable: live,
   };
 }
 

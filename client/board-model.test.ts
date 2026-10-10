@@ -120,4 +120,9 @@ describe("columnWidthFor", () => {
   it("never goes below the minimum width", () => {
     expect(columnWidthFor(900, 30, 5)).toBe(200);
   });
+
+  it("allows columns wider than the fill width, up to 500%", () => {
+    expect(columnWidthFor(1824, 150, 5)).toBe(525);
+    expect(columnWidthFor(1824, 600, 5)).toBe(columnWidthFor(1824, 500, 5));
+  });
 });

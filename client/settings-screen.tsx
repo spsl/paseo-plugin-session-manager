@@ -828,9 +828,9 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
           />
           <NumberInput
             label="看板列宽（%）"
-            hint="相对于五列铺满屏幕时的宽度，范围 30–100，默认 60；每列最窄 200px。"
-            initialValue={values?.columnWidthPercent ?? 60}
-            range={{ min: 30, max: 100 }}
+            hint="相对于五列铺满屏幕时的宽度，范围 30–500，默认 90；每列最窄 200px，超过 100 可横向滚动。"
+            initialValue={values?.columnWidthPercent ?? 90}
+            range={{ min: 30, max: 500 }}
             disabled={disabled}
             onCommit={function commit(value) {
               void save({ columnWidthPercent: value });

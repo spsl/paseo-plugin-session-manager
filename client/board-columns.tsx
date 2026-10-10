@@ -1,13 +1,11 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { canDrop } from "../shared/drop-target";
 import { COLUMNS } from "../shared/presentation";
 import type { BoardColumn, SessionView } from "../shared/types";
 import { BOARD_GAP, BOARD_PADDING, columnWidthFor, MIN_COLUMN_WIDTH } from "./board-model";
 import { SessionCard } from "./session-card";
-import { columnTone, toneBackground } from "./styles";
-import type { BoardDrag } from "./use-board-drag";
+import { columnTone } from "./styles";
 
 type ColumnDef = (typeof COLUMNS)[number];
 
@@ -15,18 +13,15 @@ type CommonProps = {
   theme: PluginTheme;
   now: number;
   groups: Record<BoardColumn, SessionView[]>;
-  /** null disables dragging (compact layout). */
-  drag: BoardDrag | null;
   onOpen(session: SessionView): void;
 };
 
 function CardList(props: CommonProps & { column: ColumnDef }) {
-  const { theme, drag, column } = props;
+  const { theme, column } = props;
   const sessions = props.groups[column.id];
   return (
     <ScrollView
       style={{ flex: 1 }}
-      scrollEnabled={drag === null ? true : drag.scrollEnabled}
       nestedScrollEnabled
       contentContainerStyle={{ gap: 8, padding: 8, paddingTop: 0 }}
     >
@@ -49,11 +44,7 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
               session={session}
               theme={theme}
               now={props.now}
-              draggable={drag !== null && session.draggable && session.liveness === "live"}
-              dragging={drag?.active?.session.id === session.id}
               onOpen={props.onOpen}
-              onDragStart={drag?.startDrag}
-              onPressOut={drag?.onCardPressOut}
             />
           );
         })
@@ -63,27 +54,20 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
 }
 
 function BoardColumnView(props: CommonProps & { column: ColumnDef; width: number | null }) {
-  const { theme, drag, column } = props;
+  const { theme, column } = props;
   const { colors } = theme;
   const tone = columnTone(theme, column.id);
-  const hovered = drag?.active != null && drag.hover === column.id;
-  const valid = hovered && drag?.active ? canDrop(drag.active.session, column.id) : false;
-  const borderColor = hovered ? (valid ? colors.accent : colors.statusDanger) : colors.border;
 
   return (
     <View
-      ref={function register(view) {
-        drag?.registerColumn(column.id, view);
-      }}
-      collapsable={false}
       style={{
         ...(props.width === null
           ? { flexGrow: 1, flexBasis: MIN_COLUMN_WIDTH, minWidth: MIN_COLUMN_WIDTH }
           : { width: props.width, flexGrow: 0, flexShrink: 0 }),
         borderRadius: 10,
-        borderWidth: hovered ? 2 : 1,
-        borderColor,
-        backgroundColor: hovered && valid ? toneBackground(theme, colors.accent) : colors.surface0,
+        borderWidth: 1,
+        borderColor: colors.border,
+        backgroundColor: colors.surface0,
       }}
     >
       <View style={{ padding: 10, gap: 2 }}>
@@ -112,7 +96,6 @@ export function WideColumns(props: CommonProps & { columnWidthPercent: number })
   return (
     <ScrollView
       horizontal
-      scrollEnabled={props.drag === null ? true : props.drag.scrollEnabled}
       style={{ flex: 1 }}
       onLayout={function measure(event) {
         setContainerWidth(event.nativeEvent.layout.width);
