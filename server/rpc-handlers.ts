@@ -6,6 +6,7 @@ import {
   detailRpc,
   forgetRpc,
   reanalyzeRpc,
+  piModelsRpc,
   setManualStatusRpc,
   snapshotRpc,
   speechRenderRpc,
@@ -14,6 +15,7 @@ import {
   testAnalyzerRpc,
 } from "../shared/rpc";
 import type { AnnouncementFeed } from "./announcements";
+import { listPiModels } from "./pi-models";
 import { listSayVoices, renderWithSay, sayAvailable } from "./say";
 import { stopAgentViaCli } from "./stop-agent";
 import type { SessionManagerService } from "./service";
@@ -79,5 +81,9 @@ export function registerRpcHandlers(
   server.handle(testAnalyzerRpc, async (_input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return service.testAnalyzer();
+  });
+  server.handle(piModelsRpc, async () => {
+    const settings = await service.currentAnalyzerSettings();
+    return listPiModels(settings.command);
   });
 }

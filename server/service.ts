@@ -168,6 +168,11 @@ export class SessionManagerService {
     this.paseo = paseo;
   }
 
+  /** Fresh settings for RPCs that must not run on a stale cache. */
+  async currentAnalyzerSettings(): Promise<AnalyzerSettings> {
+    return this.deps.settings.refresh();
+  }
+
   /** Called when settings change: queued work may now be runnable. */
   settingsChanged(): void {
     this.pruneExcluded();

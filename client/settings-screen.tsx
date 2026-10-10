@@ -20,8 +20,18 @@ import {
   type AnalyzerAgent,
 } from "../shared/analysis-config";
 import { ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/settings";
-import { speechVoicesRpc, testAnalyzerRpc } from "../shared/rpc";
-import { SPEECH_SETTINGS, RATE_OPTIONS, type SpeechEngine, type SpeechSettings, type SpeechVoice } from "../shared/speech";
+import {
+  piModelsRpc,
+  speechVoicesRpc,
+  testAnalyzerRpc,
+} from "../shared/rpc";
+import {
+  SPEECH_SETTINGS,
+  RATE_OPTIONS,
+  type SpeechEngine,
+  type SpeechSettings,
+  type SpeechVoice,
+} from "../shared/speech";
 import { getAnnouncer, isMutedHere, mirrorSettings, setMutedHere } from "./announcer";
 import { PromptEditor } from "./prompt-editor";
 import { errorText } from "./styles";
@@ -136,6 +146,21 @@ function TextCommitInput(props: {
 }
 
 const TEST_SENTENCE = "会话看板：这是一条测试语音，之后的播报会像这样。";
+
+/**
+ * Pi reports whether a model does reasoning at all; when it does not, no effort
+ * flag is offered (pi would reject `--thinking`). Unknown ids assume yes.
+ */
+function piSupportsThinkingFor(
+  agent: AnalyzerAgent,
+  model: string,
+  thinking: Record<string, boolean>,
+): boolean {
+  if (agent !== "pi") {
+    return true;
+  }
+  return thinking[model] !== false;
+}
 
 function SpeechSection(props: { disabled?: boolean }) {
   const toast = useToast();
@@ -368,8 +393,15 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
   const toast = useToast();
   const settings = useSettings(ANALYZER_SETTINGS);
   const runTest = useRpc(testAnalyzerRpc);
+  const loadPiModels = useRpc(piModelsRpc);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [piModels, setPiModels] = useState<{
+    options: { label: string; value: string }[];
+    thinking: Record<string, boolean>;
+    problem: string | null;
+    loaded: boolean;
+  }>({ options: [], thinking: {}, problem: null, loaded: false });
   // Bumped when the model select changes so the free-input remounts with the new value.
   const [modelEpoch, setModelEpoch] = useState(0);
 
@@ -423,10 +455,60 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
   const modelOptions = getAnalyzerModelOptions(config.agent).map(function toOption(option) {
     return { label: option.label, value: option.id };
   });
+  // Pi's catalog comes from the CLI itself; the shared seed stays for the others.
+  if (config.agent === "pi" && piModels.options.length > 0) {
+    modelOptions.length = 0;
+    modelOptions.push(...piModels.options);
+  }
   if (!modelOptions.some((option) => option.value === config.model)) {
     modelOptions.unshift({ label: `${config.model}（自定义）`, value: config.model });
   }
-  const thinkingOptions = getThinkingLevelOptions(config.agent, config.model);
+  // Pi reports per-model reasoning support, which outranks the generic table.
+  const piSupportsThinking = piSupportsThinkingFor(config.agent, config.model, piModels.thinking);
+  const thinkingOptions = piSupportsThinking
+    ? []
+    : getThinkingLevelOptions(config.agent, config.model);
+  const modelHint =
+    config.agent === "pi"
+      ? piModels.problem === null
+        ? "来自本机 pi CLI 的模型目录。"
+        : `pi 模型目录不可用：${piModels.problem}；仍可在下方填写模型 ID。`
+      : "列表之外的模型可以在下方填写模型 ID。";
+
+  // Pi has no fixed catalog: the ids live in the user's own CLI config, so the
+  // daemon asks the CLI once per agent switch instead of shipping a stale seed.
+  useEffect(
+    function loadPiModelCatalog() {
+      if (config.agent !== "pi" || piModels.loaded) {
+        return;
+      }
+      let cancelled = false;
+      setPiModels((state) => ({ ...state, loaded: true }));
+      loadPiModels({})
+        .then(function done(result) {
+          if (cancelled) return;
+          const thinking: Record<string, boolean> = {};
+          const options = result.models.map(function toOption(model) {
+            thinking[model.id] = model.thinking;
+            return { label: `${model.provider} · ${model.label}`, value: model.id };
+          });
+          setPiModels({ options, thinking, problem: result.problem, loaded: true });
+        })
+        .catch(function failed() {
+          if (cancelled) return;
+          setPiModels({
+            options: [],
+            thinking: {},
+            problem: "无法读取 pi 模型列表",
+            loaded: true,
+          });
+        });
+      return function cancel() {
+        cancelled = true;
+      };
+    },
+    [config.agent, loadPiModels, piModels.loaded],
+  );
 
   return (
     <ScrollView
@@ -468,10 +550,19 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               if (!isAnalyzerAgent(value) || value === config.agent) return;
               const next = getDefaultAnalysisConfig(value);
               setModelEpoch((epoch) => epoch + 1);
+              // A Pi catalog that is already loaded replaces the "default" seed,
+              // which would otherwise silently hand the choice back to the CLI.
+              const model =
+                value === "pi" && piModels.options.length > 0
+                  ? (piModels.options[0]?.value ?? next.model)
+                  : next.model;
+              const options = piSupportsThinkingFor(value, model, piModels.thinking)
+                ? getThinkingLevelOptions(value, model)
+                : [];
               void save({
                 agent: value,
-                model: next.model,
-                thinkingLevel: next.thinkingLevel ?? "",
+                model,
+                thinkingLevel: options[0]?.id ?? "",
               });
             }}
           />
@@ -481,7 +572,10 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
             options={modelOptions}
             disabled={disabled}
             onValueChange={function change(value) {
-              const options = getThinkingLevelOptions(config.agent, value);
+              // A Pi model without reasoning support must not keep an effort.
+              const options = piSupportsThinkingFor(config.agent, value, piModels.thinking)
+                ? []
+                : getThinkingLevelOptions(config.agent, value);
               const keep = options.some((option) => option.id === config.thinkingLevel);
               const fallback = options.find((option) => option.id === "low") ?? options[0];
               setModelEpoch((epoch) => epoch + 1);
@@ -494,7 +588,7 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
           <TextCommitInput
             key={`model-${config.agent}-${modelEpoch}`}
             label="自定义模型 ID"
-            hint="列表之外的模型可以直接填写；留空则保持当前模型。"
+            hint={`${modelHint}留空则保持当前模型。`}
             placeholder={config.model}
             initialValue=""
             disabled={disabled}

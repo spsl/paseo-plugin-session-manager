@@ -92,6 +92,18 @@ export const speechVoicesRpc = defineRpc({
   output: z.object({ available: z.boolean(), voices: z.array(SpeechVoiceSchema) }),
 });
 
+/** The Pi CLI's own model catalog, so the analyzer settings can offer real ids. */
+export const piModelsRpc = defineRpc({
+  name: "session-manager.pi.models",
+  input: z.object({}),
+  output: z.object({
+    models: z.array(
+      z.object({ id: z.string(), label: z.string(), provider: z.string(), thinking: z.boolean() }),
+    ),
+    problem: z.string().nullable(),
+  }),
+});
+
 export const speechRenderRpc = defineRpc({
   name: "session-manager.speech.render",
   input: z.object({
