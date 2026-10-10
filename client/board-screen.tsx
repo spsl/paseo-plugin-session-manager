@@ -9,6 +9,8 @@ import {
   retainAvailableProjectSelection,
 } from "../shared/project-filter";
 import type { AnalysisStatus, BoardColumn, SessionView } from "../shared/types";
+import { isDesktop, isFullscreen, setFullscreen } from "./desktop-bridge";
+import { FALLBACK_HINT, NOTICE_NO_WINDOW, openBoardInNewWindow } from "./open-board-window";
 import { useSnapshotNudges } from "./agents-watch";
 import { Chip } from "./badge";
 import { groupByColumn } from "./board-model";
@@ -66,6 +68,53 @@ export function BoardScreen(props: PluginScreenProps) {
       }
     },
     [paramSessionId],
+  );
+
+  const standalone = params.standalone === "1";
+  const desktop = isDesktop();
+  const [fullscreen, setFullscreenState] = useState(false);
+  useEffect(
+    function readFullscreen() {
+      if (!desktop) {
+        return;
+      }
+      let alive = true;
+      void isFullscreen().then(function apply(value) {
+        if (alive && value !== null) {
+          setFullscreenState(value);
+        }
+      });
+      return function stop() {
+        alive = false;
+      };
+    },
+    [desktop],
+  );
+  const toggleFullscreen = useCallback(
+    function toggle() {
+      const next = !fullscreen;
+      if (setFullscreen(next)) {
+        setFullscreenState(next);
+      }
+    },
+    [fullscreen],
+  );
+  const openWindow = useCallback(
+    function open() {
+      if (!openBoardInNewWindow()) {
+        toast.show(FALLBACK_HINT, { variant: "warning", durationMs: 8000 });
+      }
+    },
+    [toast],
+  );
+  const notice = params.notice ?? null;
+  useEffect(
+    function showNotice() {
+      if (notice === NOTICE_NO_WINDOW) {
+        toast.show(FALLBACK_HINT, { variant: "warning", durationMs: 8000 });
+      }
+    },
+    [notice, toast],
   );
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
@@ -214,16 +263,44 @@ export function BoardScreen(props: PluginScreenProps) {
           alignItems: "center",
           gap: 8,
           paddingHorizontal: 12,
-          paddingTop: 12,
+          paddingTop: standalone ? 6 : 12,
         }}
       >
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ color: colors.foreground, fontSize: 16, fontWeight: "700" }}>会话看板</Text>
-          <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
-            根据当前执行状态与最新分析结论归类
-          </Text>
+          {standalone ? null : (
+            <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+              根据当前执行状态与最新分析结论归类
+            </Text>
+          )}
         </View>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{countLabel}</Text>
+        {desktop && !standalone ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="新窗口打开"
+            hitSlop={8}
+            onPress={openWindow}
+            style={{ padding: 6 }}
+          >
+            <Icon name="AppWindow" size={18} color={colors.foregroundMuted} />
+          </Pressable>
+        ) : null}
+        {desktop ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={fullscreen ? "退出全屏" : "全屏"}
+            hitSlop={8}
+            onPress={toggleFullscreen}
+            style={{ padding: 6 }}
+          >
+            <Icon
+              name={fullscreen ? "Minimize" : "Maximize"}
+              size={18}
+              color={colors.foregroundMuted}
+            />
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="会话看板设置"

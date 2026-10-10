@@ -1,6 +1,12 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { BoardScreen, bindSettingsOpener, SETTINGS_SCREEN_ID } from "./client/board-screen";
 import { SessionManagerSettingsScreen } from "./client/settings-screen";
+import {
+  consumeBoardHandoff,
+  NOTICE_NO_WINDOW,
+  openBoardInNewWindow,
+} from "./client/open-board-window";
+import { isDesktop } from "./client/desktop-bridge";
 import { BOARD_SCREEN_ID, BoardSidebarItem } from "./client/sidebar";
 
 const BOARD_TITLE = "会话看板";
@@ -36,6 +42,23 @@ export default function contribute(client: PluginClientContext) {
       },
     }),
   );
+  if (isDesktop()) {
+    cleanups.push(
+      client.addCommandCenterItem({
+        id: "open-board-window",
+        title: "在新窗口打开会话看板",
+        icon: "AppWindow",
+        keywords: ["看板", "新窗口", "全屏", "window", "board", "fullscreen"],
+        context: "global",
+        onSelect({ openScreen }) {
+          if (!openBoardInNewWindow()) {
+            // Commands have no toast; the board shows the hint for this param.
+            openScreen({ screenId: BOARD_SCREEN_ID, params: { notice: NOTICE_NO_WINDOW } });
+          }
+        },
+      }),
+    );
+  }
   cleanups.push(
     client.addCommandCenterItem({
       id: "board-settings",
@@ -48,6 +71,10 @@ export default function contribute(client: PluginClientContext) {
       },
     }),
   );
+
+  consumeBoardHandoff(function openBoard(params) {
+    client.openScreen({ screenId: BOARD_SCREEN_ID, params });
+  });
 
   return function cleanup() {
     bindSettingsOpener(null);
