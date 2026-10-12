@@ -16,3 +16,7 @@ export function pluginDir(): string {
 export function statePath(): string {
   return join(pluginDir(), "state.json");
 }
+
+export function draftsPath(): string {
+  return join(pluginDir(), "drafts.json");
+}

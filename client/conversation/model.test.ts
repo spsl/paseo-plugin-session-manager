@@ -12,6 +12,7 @@ import {
   truncateText,
   type Row,
 } from "./model";
+import { pendingTurnCard, supersededTurnCard, SESSION_CARD_KIND, SESSION_CARD_VERSION } from "../../shared/card";
 import { extractChoices, permissionView, responseFor, visiblePermissions } from "./permissions";
 
 describe("appendItem", () => {
@@ -64,6 +65,35 @@ describe("appendItem", () => {
     rows = appendItem(rows, { type: "compaction", status: "completed" }, 3);
     rows = appendItem(rows, { type: "plugin", kind: "k" }, 4);
     expect(rows.map((row) => row.kind)).toEqual(["error", "note", "note", "note"]);
+    expect(rows[3]).toMatchObject({ text: "插件事件 · k" });
+  });
+
+  it("maps session-manager plugin rows to cards and upserts them by id", () => {
+    const card = pendingTurnCard();
+    let rows: Row[] = [];
+    rows = appendItem(
+      rows,
+      { type: "plugin", id: "t1", pluginId: "session-manager", kind: SESSION_CARD_KIND, version: SESSION_CARD_VERSION, data: card },
+      1,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "session-card", cardId: "session-manager:t1" });
+    rows = appendItem(
+      rows,
+      { type: "plugin", id: "t1", pluginId: "session-manager", kind: SESSION_CARD_KIND, version: SESSION_CARD_VERSION, data: supersededTurnCard() },
+      2,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "session-card", data: { state: "superseded" } });
+  });
+
+  it("falls back to a note when card data fails the schema", () => {
+    const rows = appendItem(
+      [],
+      { type: "plugin", id: "t1", kind: SESSION_CARD_KIND, version: SESSION_CARD_VERSION, data: { nope: 1 } },
+      1,
+    );
+    expect(rows[0]).toMatchObject({ kind: "note", text: `插件事件 · ${SESSION_CARD_KIND}` });
   });
 });
 

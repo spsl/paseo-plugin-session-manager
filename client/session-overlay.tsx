@@ -8,10 +8,11 @@ import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
-import { analysisStatusLabel, sessionTitle } from "../shared/presentation";
-import type { SessionDetail } from "../shared/types";
+import { analysisStatusLabel, resumeStateLabel, sessionTitle } from "../shared/presentation";
+import { isActiveLiveness, type SessionDetail } from "../shared/types";
 import { Badge, Chip } from "./badge";
 import { ConversationPane } from "./conversation/conversation-pane";
+import { DeferMenu } from "./defer-menu";
 import { DetailContent, useDetailActions } from "./detail-content";
 import { columnTone, errorText, statusTone } from "./styles";
 import { useDetail } from "./use-snapshot";
@@ -30,10 +31,17 @@ export function SessionOverlay(props: Props) {
   const { sessionId, theme, compact, onClose } = props;
   const { colors } = theme;
   const detail = useDetail(sessionId);
+  const [deferOpen, setDeferOpen] = useState(false);
   if (sessionId === null) {
     return null;
   }
   const session = detail.data?.session ?? null;
+
+  const openDefer = session
+    ? function open() {
+        setDeferOpen(true);
+      }
+    : undefined;
 
   let body;
   if (detail.isLoading) {
@@ -60,7 +68,13 @@ export function SessionOverlay(props: Props) {
     );
   } else {
     body = (
-      <OverlayBody key={session.id} session={session} theme={theme} compact={compact} />
+      <OverlayBody
+        key={session.id}
+        session={session}
+        theme={theme}
+        compact={compact}
+        onDefer={openDefer}
+      />
     );
   }
 
@@ -146,6 +160,14 @@ export function SessionOverlay(props: Props) {
         </View>
         <View style={{ flex: 1, minHeight: 0 }}>{body}</View>
       </View>
+      <DeferMenu
+        session={deferOpen ? session : null}
+        theme={theme}
+        now={Date.now()}
+        onClose={function close() {
+          setDeferOpen(false);
+        }}
+      />
     </View>
   );
 }
@@ -223,13 +245,25 @@ function HeaderActions(props: {
 
 function HeaderBadges(props: { session: SessionDetail; theme: PluginTheme }) {
   const { session, theme } = props;
-  const live = session.liveness === "live";
+  const active = isActiveLiveness(session.liveness);
+  const resume = resumeStateLabel(session);
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      {resume !== null ? (
+        <Badge
+          theme={theme}
+          label={resume}
+          tone={
+            session.resumeState === "failed"
+              ? theme.colors.statusDanger
+              : theme.colors.foregroundMuted
+          }
+        />
+      ) : null}
       <Badge
         theme={theme}
-        label={live ? analysisStatusLabel(session.effectiveStatus) : "已关闭"}
-        tone={live ? statusTone(theme, session.effectiveStatus) : columnTone(theme, "closed")}
+        label={active ? analysisStatusLabel(session.effectiveStatus) : "已关闭"}
+        tone={active ? statusTone(theme, session.effectiveStatus) : columnTone(theme, "closed")}
       />
       {session.pendingPermissionCount > 0 ? (
         <Badge theme={theme} label="待确认" tone={theme.colors.statusWarning} />
@@ -238,10 +272,16 @@ function HeaderBadges(props: { session: SessionDetail; theme: PluginTheme }) {
   );
 }
 
-function OverlayBody(props: { session: SessionDetail; theme: PluginTheme; compact: boolean }) {
+function OverlayBody(props: {
+  session: SessionDetail;
+  theme: PluginTheme;
+  compact: boolean;
+  onDefer?(): void;
+}) {
   const { session, theme, compact } = props;
-  const live = session.liveness === "live";
-  const [tab, setTab] = useState<Tab>(live ? "conversation" : "overview");
+  // Dormant sessions reopen the conversation tab: sending a message resumes them.
+  const active = isActiveLiveness(session.liveness);
+  const [tab, setTab] = useState<Tab>(active ? "conversation" : "overview");
 
   const overview = (
     <ScrollView
@@ -249,10 +289,12 @@ function OverlayBody(props: { session: SessionDetail; theme: PluginTheme; compac
       contentContainerStyle={{ padding: 14, gap: 16 }}
       keyboardShouldPersistTaps="handled"
     >
-      <DetailContent session={session} theme={theme} />
+      <DetailContent session={session} theme={theme} onDefer={props.onDefer} />
     </ScrollView>
   );
-  const conversation = <ConversationPane sessionId={session.id} theme={theme} live={live} />;
+  const conversation = (
+    <ConversationPane sessionId={session.id} theme={theme} live={active} compact={compact} />
+  );
 
   if (compact) {
     return (

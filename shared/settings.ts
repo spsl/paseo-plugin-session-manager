@@ -24,6 +24,8 @@ export const ANALYZER_SETTINGS = defineSettings({
     writeBackTitle: z.boolean().default(false),
     seedAnalyzeLimit: z.number().int().min(0).max(50).default(10),
     closedRetentionDays: z.number().int().min(1).max(90).default(7),
+    /** Which dormant sessions to resume after a Paseo restart. */
+    autoResume: z.enum(["attention", "all", "off"]).default("attention"),
     /** Board column width as a percentage of the width that would fill the screen. */
     columnWidthPercent: z.number().int().min(30).max(500).default(90),
     /** Comma/whitespace separated label keys (or key=value); matching agents are hidden and never analyzed. */
@@ -40,13 +42,14 @@ export const DEFAULT_ANALYZER_SETTINGS: AnalyzerSettings = {
   thinkingLevel: "low",
   systemPrompt: "",
   command: "",
-    magpieBaseUrl: "",
-    magpieApiKey: "",
+  magpieBaseUrl: "",
+  magpieApiKey: "",
   concurrency: 2,
   timeoutSeconds: 120,
   writeBackTitle: false,
   seedAnalyzeLimit: 10,
   closedRetentionDays: 7,
+  autoResume: "attention",
   columnWidthPercent: 90,
   excludedLabelKeys: "herald.role",
 };

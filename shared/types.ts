@@ -38,15 +38,28 @@ export const LIFECYCLES = ["working", "waiting_permission", "idle", "error", "un
 export type Lifecycle = (typeof LIFECYCLES)[number];
 export const LifecycleSchema = z.enum(LIFECYCLES);
 
-export const LIVENESSES = ["live", "closed", "archived"] as const;
+export const LIVENESSES = ["live", "dormant", "closed", "archived"] as const;
 export type Liveness = (typeof LIVENESSES)[number];
 export const LivenessSchema = z.enum(LIVENESSES);
+
+/**
+ * "dormant" means closed because Paseo restarted; it is resumable and still
+ * counts as an active session on the board. live || dormant.
+ */
+export function isActiveLiveness(liveness: Liveness): boolean {
+  return liveness === "live" || liveness === "dormant";
+}
+
+export const RESUME_STATES = ["idle", "queued", "resuming", "failed"] as const;
+export type ResumeState = (typeof RESUME_STATES)[number];
+export const ResumeStateSchema = z.enum(RESUME_STATES);
 
 export const BOARD_COLUMNS = [
   "unclear",
   "waiting_for_user",
   "in_progress",
   "completed",
+  "deferred",
   "closed",
 ] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
@@ -131,6 +144,15 @@ export const SessionViewSchema = z.object({
   analysis: AnalysisSchema.nullable(),
   analysisError: z.string().nullable(),
   manualStatusOverride: AnalysisStatusSchema.nullable(),
+  /** Defer display until this timestamp; null when not deferred. */
+  deferredUntil: z.number().nullable(),
+  /** A deferred session either sits masked in its column or parks in the deferred queue. */
+  deferToQueue: z.boolean(),
+  /** Set when a Paseo restart closed the session mid-task (working or awaiting permission). */
+  interruptedAt: z.number().nullable(),
+  /** Runtime resume progress for dormant sessions; always idle after a reload. */
+  resumeState: ResumeStateSchema,
+  resumeError: z.string().nullable(),
   titleState: TitleStateSchema,
   createdAt: z.number(),
   updatedAt: z.number(),

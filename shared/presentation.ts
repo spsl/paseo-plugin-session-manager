@@ -17,7 +17,19 @@ export const COLUMNS: readonly { id: BoardColumn; label: string; hint: string }[
   { id: "waiting_for_user", label: "需要处理", hint: "等待确认、输入、选择或审批" },
   { id: "in_progress", label: "进行中", hint: "Agent 正在推进任务" },
   { id: "completed", label: "已完成", hint: "当前分析明确表示任务完成" },
+  { id: "deferred", label: "延迟队列", hint: "暂缓显示，到期自动恢复" },
   { id: "closed", label: "已关闭", hint: "Agent 会话已经结束或归档" },
+];
+
+/** Fixed defer durations offered by the card button and the detail pane. */
+export const DEFER_DURATIONS: readonly { ms: number; label: string }[] = [
+  { ms: 30 * 60_000, label: "30 分钟" },
+  { ms: 60 * 60_000, label: "1 小时" },
+  { ms: 4 * 60 * 60_000, label: "4 小时" },
+  { ms: 8 * 60 * 60_000, label: "8 小时" },
+  { ms: 24 * 60 * 60_000, label: "24 小时" },
+  { ms: 2 * 24 * 60 * 60_000, label: "2 天" },
+  { ms: 4 * 24 * 60 * 60_000, label: "4 天" },
 ];
 
 export const STATUS_OPTIONS: readonly { status: AnalysisStatus; label: string }[] = [
@@ -125,10 +137,33 @@ export function livenessLabel(liveness: Liveness): string {
   switch (liveness) {
     case "live":
       return "活跃";
+    case "dormant":
+      return "未连接";
     case "closed":
       return "已关闭";
     case "archived":
       return "已归档";
+  }
+}
+
+/** Shown when a Paseo restart closed the session while it had work in flight. */
+export const RESTART_INTERRUPTED_TEXT = "Paseo 重启时任务被中断";
+
+/** Badge text for a dormant session's resume progress; null for other liveness. */
+export function resumeStateLabel(
+  session: Pick<SessionView, "liveness" | "resumeState">,
+): string | null {
+  if (session.liveness !== "dormant") {
+    return null;
+  }
+  switch (session.resumeState) {
+    case "queued":
+    case "resuming":
+      return "恢复中…";
+    case "failed":
+      return "恢复失败";
+    default:
+      return "未连接";
   }
 }
 
@@ -147,4 +182,34 @@ export function formatShortTimeAgo(timestamp: number, now: number): string {
     return `${hours}小时前`;
   }
   return `${Math.floor(hours / 24)}天前`;
+}
+
+/** Resume time for a deferred session: today shows HH:mm, later dates add M月d日. */
+export function formatDeferUntil(until: number, now: number): string {
+  const date = new Date(until);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const today = new Date(now);
+  const sameDay =
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate();
+  return sameDay ? hm : `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+}
+
+/** Compact Chinese countdown: 即将恢复 / 剩余 N 分钟 / N 小时 / N 天. */
+export function formatDeferRemaining(until: number, now: number): string {
+  const delta = until - now;
+  if (delta <= 0) {
+    return "即将恢复";
+  }
+  const minutes = Math.ceil(delta / 60_000);
+  if (minutes < 60) {
+    return `剩余 ${minutes} 分钟`;
+  }
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 24) {
+    return `剩余 ${hours} 小时`;
+  }
+  return `剩余 ${Math.ceil(hours / 24)} 天`;
 }

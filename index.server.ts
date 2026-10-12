@@ -5,7 +5,8 @@ import { AnnouncementFeed } from "./server/announcements";
 import { TimelineCardPublisher } from "./server/cards";
 import { CardNotifier } from "./server/notifier";
 import { SpeechSettingsCache } from "./server/speech-settings";
-import { statePath } from "./server/data-dir";
+import { draftsPath, statePath } from "./server/data-dir";
+import { DraftStore } from "./server/drafts";
 import { registerHooks } from "./server/hooks";
 import { registerRpcHandlers } from "./server/rpc-handlers";
 import { SessionManagerService } from "./server/service";
@@ -23,6 +24,7 @@ export default function contribute(server: PluginServerContext) {
     speechSettings: () => speechSettings.current(),
   });
   const store = new JsonStateStore(statePath());
+  const drafts = new DraftStore(draftsPath());
   let service: SessionManagerService | null = null;
   const settings = new SettingsCache(settingsHandle, () => service?.settingsChanged());
   service = new SessionManagerService({ store, settings, notifier });
@@ -30,7 +32,7 @@ export default function contribute(server: PluginServerContext) {
 
   // Handlers register synchronously; restored state merges in when the load lands.
   const unregisterHooks = registerHooks(server, active);
-  registerRpcHandlers(server, active, feed);
+  registerRpcHandlers(server, active, feed, drafts);
   settings.start();
   speechSettings.start();
   void active
@@ -47,6 +49,9 @@ export default function contribute(server: PluginServerContext) {
     settings.stop();
     speechSettings.stop();
     active.stop();
-    await store.flush();
+    // Sessions closed by the daemon's own shutdown become resumable "dormant";
+    // must run before the flush so the change reaches disk.
+    active.prepareShutdown();
+    await Promise.all([store.flush(), drafts.flush()]);
   };
 }

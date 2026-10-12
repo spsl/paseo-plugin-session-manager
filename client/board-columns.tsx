@@ -14,6 +14,8 @@ type CommonProps = {
   now: number;
   groups: Record<BoardColumn, SessionView[]>;
   onOpen(session: SessionView): void;
+  onDefer(session: SessionView): void;
+  onResume(session: SessionView): void;
 };
 
 function CardList(props: CommonProps & { column: ColumnDef }) {
@@ -45,6 +47,8 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
               theme={theme}
               now={props.now}
               onOpen={props.onOpen}
+              onDefer={props.onDefer}
+              onResume={props.onResume}
             />
           );
         })

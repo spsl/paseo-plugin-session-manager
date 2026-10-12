@@ -2,6 +2,7 @@
 import { columnForStatus } from "../shared/presentation";
 import {
   BOARD_COLUMNS,
+  isActiveLiveness,
   type AnalysisStatus,
   type BoardColumn,
   type SessionView,
@@ -12,20 +13,56 @@ export const POLL_IDLE_MS = 10_000;
 
 type WithSessions = { sessions: SessionView[]; seeding?: boolean };
 
-/** Groups sessions per column, most recently updated first. */
+/** An active (live or dormant) session whose defer time is still in the future. */
+export function isDeferred(session: SessionView, now: number): boolean {
+  return (
+    isActiveLiveness(session.liveness) &&
+    session.deferredUntil !== null &&
+    session.deferredUntil > now
+  );
+}
+
+/**
+ * The column a card renders in at `now`. Queued defers park in "deferred";
+ * everything else follows the server projection, except a stale "deferred"
+ * projection whose defer already expired locally (it rejoins its real column
+ * without waiting for the next snapshot).
+ */
+export function boardColumnOf(session: SessionView, now: number): BoardColumn {
+  if (isDeferred(session, now) && session.deferToQueue) {
+    return "deferred";
+  }
+  if (session.column === "deferred") {
+    return isActiveLiveness(session.liveness) ? columnForStatus(session.effectiveStatus) : "closed";
+  }
+  return session.column;
+}
+
+/**
+ * Groups sessions per column at `now`. Normal columns put deferred cards last;
+ * the deferred column itself orders by resume time, soonest first.
+ */
 export function groupByColumn(
   sessions: readonly SessionView[],
+  now: number,
 ): Record<BoardColumn, SessionView[]> {
   const groups = {} as Record<BoardColumn, SessionView[]>;
   for (const column of BOARD_COLUMNS) {
     groups[column] = [];
   }
   for (const session of sessions) {
-    groups[session.column].push(session);
+    groups[boardColumnOf(session, now)].push(session);
   }
   for (const column of BOARD_COLUMNS) {
-    groups[column].sort(function byUpdatedDesc(left, right) {
-      return right.updatedAt - left.updatedAt;
+    if (column === "deferred") {
+      groups[column].sort(function byResumeAsc(left, right) {
+        return (left.deferredUntil ?? 0) - (right.deferredUntil ?? 0);
+      });
+      continue;
+    }
+    groups[column].sort(function byDeferredLast(left, right) {
+      const deferredDiff = Number(isDeferred(left, now)) - Number(isDeferred(right, now));
+      return deferredDiff !== 0 ? deferredDiff : right.updatedAt - left.updatedAt;
     });
   }
   return groups;
@@ -45,6 +82,71 @@ export function attentionSessions(
     .slice(0, limit);
 }
 
+/**
+ * The workspace group a session belongs to: the Paseo workspace when known,
+ * else its project, else the working directory (last path segment as label).
+ */
+export function workspaceKeyOf(session: SessionView): string {
+  const workspaceId = session.workspaceId?.trim();
+  if (workspaceId) {
+    return `ws:${workspaceId}`;
+  }
+  const projectKey = session.projectKey?.trim();
+  if (projectKey) {
+    return `proj:${projectKey}`;
+  }
+  return `cwd:${session.cwd}`;
+}
+
+export function workspaceLabelOf(session: SessionView): string {
+  const name = session.workspaceName?.trim() || session.projectName?.trim();
+  if (name) {
+    return name;
+  }
+  const parts = session.cwd.split("/").filter(function nonEmpty(part) {
+    return part !== "";
+  });
+  return parts.length > 0 ? (parts[parts.length - 1] ?? "未关联") : "未关联";
+}
+
+export type WorkspaceAttentionGroup = {
+  key: string;
+  label: string;
+  attentionCount: number;
+};
+
+/** Workspaces that have sessions needing attention, most urgent first. */
+export function workspaceAttentionGroups(
+  sessions: readonly SessionView[],
+): WorkspaceAttentionGroup[] {
+  const groups = new Map<string, WorkspaceAttentionGroup & { latest: number }>();
+  for (const session of sessions) {
+    if (!session.needsAttention) {
+      continue;
+    }
+    const key = workspaceKeyOf(session);
+    const current = groups.get(key);
+    if (current) {
+      current.attentionCount += 1;
+      current.latest = Math.max(current.latest, session.updatedAt);
+    } else {
+      groups.set(key, {
+        key,
+        label: workspaceLabelOf(session),
+        attentionCount: 1,
+        latest: session.updatedAt,
+      });
+    }
+  }
+  return [...groups.values()]
+    .sort(function byRecent(left, right) {
+      return right.latest - left.latest || left.label.localeCompare(right.label, "zh-CN");
+    })
+    .map(function strip(group) {
+      return { key: group.key, label: group.label, attentionCount: group.attentionCount };
+    });
+}
+
 export function pollIntervalFor(snapshot: WithSessions | undefined): number {
   if (!snapshot) {
     return POLL_IDLE_MS;
@@ -53,7 +155,12 @@ export function pollIntervalFor(snapshot: WithSessions | undefined): number {
     return POLL_BUSY_MS;
   }
   const busy = snapshot.sessions.some(function isBusy(session) {
-    return session.analysisState === "queued" || session.analysisState === "running";
+    return (
+      session.analysisState === "queued" ||
+      session.analysisState === "running" ||
+      session.resumeState === "queued" ||
+      session.resumeState === "resuming"
+    );
   });
   return busy ? POLL_BUSY_MS : POLL_IDLE_MS;
 }
@@ -72,13 +179,15 @@ function mapSession<T extends WithSessions>(
 }
 
 function withStatus(session: SessionView, status: AnalysisStatus): SessionView {
-  const column: BoardColumn = session.liveness === "live" ? columnForStatus(status) : "closed";
+  const column: BoardColumn = isActiveLiveness(session.liveness)
+    ? columnForStatus(status)
+    : "closed";
   return {
     ...session,
     effectiveStatus: status,
     column,
     needsAttention:
-      session.liveness === "live" &&
+      isActiveLiveness(session.liveness) &&
       (column === "waiting_for_user" || session.pendingPermissionCount > 0),
   };
 }
@@ -89,19 +198,23 @@ export function patchManualStatus<T extends WithSessions>(
   status: AnalysisStatus,
 ): T {
   return mapSession(snapshot, sessionId, function apply(session) {
-    if (session.liveness !== "live") {
+    if (!isActiveLiveness(session.liveness)) {
       return session;
     }
     return { ...withStatus(session, status), manualStatusOverride: status };
   });
 }
 
-/** Mirrors the server projection: permission > working > model verdict. */
+/** Mirrors the server projection: interrupted > permission > working > model verdict. */
 export function automaticStatus(session: SessionView): AnalysisStatus {
-  if (session.pendingPermissionCount > 0) {
+  if (session.interruptedAt !== null) {
     return "waiting_for_user";
   }
-  if (session.lifecycle === "working") {
+  const live = session.liveness === "live";
+  if (live && session.pendingPermissionCount > 0) {
+    return "waiting_for_user";
+  }
+  if (live && session.lifecycle === "working") {
     return "in_progress";
   }
   return session.modelStatus;
@@ -119,6 +232,81 @@ export function patchClearManualStatus<T extends WithSessions>(snapshot: T, sess
 export function patchReanalyze<T extends WithSessions>(snapshot: T, sessionId: string): T {
   return mapSession(snapshot, sessionId, function apply(session) {
     return { ...session, analysisState: "queued", analysisError: null };
+  });
+}
+
+export function patchDefer<T extends WithSessions>(
+  snapshot: T,
+  sessionId: string,
+  until: number,
+  toQueue: boolean,
+): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    if (!isActiveLiveness(session.liveness)) {
+      return session;
+    }
+    const column: BoardColumn = toQueue
+      ? "deferred"
+      : session.column === "deferred"
+        ? columnForStatus(session.effectiveStatus)
+        : session.column;
+    return {
+      ...session,
+      deferredUntil: until,
+      deferToQueue: toQueue,
+      column,
+      needsAttention: false,
+    };
+  });
+}
+
+export function patchClearDefer<T extends WithSessions>(snapshot: T, sessionId: string): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    const column =
+      session.column === "deferred"
+        ? isActiveLiveness(session.liveness)
+          ? columnForStatus(session.effectiveStatus)
+          : "closed"
+        : session.column;
+    return {
+      ...session,
+      deferredUntil: null,
+      deferToQueue: false,
+      column,
+      needsAttention:
+        isActiveLiveness(session.liveness) &&
+        (column === "waiting_for_user" || session.pendingPermissionCount > 0),
+    };
+  });
+}
+
+/** Optimistic: a resume request was accepted; the board shows "恢复中…". */
+export function patchResume<T extends WithSessions>(snapshot: T, sessionId: string): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    if (session.liveness !== "dormant") {
+      return session;
+    }
+    return { ...session, resumeState: "resuming", resumeError: null };
+  });
+}
+
+/** Optimistic: "不再恢复" drops the session into the closed column. */
+export function patchDismissResume<T extends WithSessions>(snapshot: T, sessionId: string): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    if (session.liveness !== "dormant") {
+      return session;
+    }
+    return {
+      ...session,
+      liveness: "closed",
+      interruptedAt: null,
+      resumeState: "idle",
+      resumeError: null,
+      deferredUntil: null,
+      deferToQueue: false,
+      column: "closed",
+      needsAttention: false,
+    };
   });
 }
 

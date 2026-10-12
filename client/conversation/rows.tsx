@@ -5,6 +5,8 @@ import { Pressable, Text, View } from "react-native";
 import { Markdown } from "../markdown/markdown";
 import { toolBody, toolSummary, type Row } from "./model";
 import { withAlpha } from "../styles";
+import { SessionTimelineCard } from "../timeline-card";
+import { SESSION_CARD_KIND, SESSION_CARD_VERSION } from "../../shared/card";
 
 function Collapsible(props: {
   theme: PluginTheme;
@@ -74,7 +76,7 @@ function toolStatusLabel(status: string): string {
   }
 }
 
-function ConversationRowView(props: { theme: PluginTheme; row: Row }) {
+function ConversationRowView(props: { theme: PluginTheme; row: Row; compact: boolean }) {
   const { theme, row } = props;
   const { colors } = theme;
   switch (row.kind) {
@@ -148,6 +150,22 @@ function ConversationRowView(props: { theme: PluginTheme; row: Row }) {
             );
           })}
         </View>
+      );
+    case "session-card":
+      return (
+        <SessionTimelineCard
+          theme={theme}
+          host={{ id: "session-manager", label: "会话看板" }}
+          layout={{ compact: props.compact, platform: "web" }}
+          agentId=""
+          timestamp={new Date(0)}
+          item={{
+            type: "plugin",
+            kind: SESSION_CARD_KIND,
+            version: SESSION_CARD_VERSION,
+            data: row.data,
+          }}
+        />
       );
     case "error":
       return (

@@ -55,6 +55,83 @@ describe("projectView", () => {
     expect(view).toMatchObject({ column: "closed", needsAttention: false, effectiveStatus: "waiting_for_user" });
   });
 
+  it("parks an unexpired queued defer in the deferred column without attention", () => {
+    const now = 1_000;
+    const view = projectView(
+      record({ deferredUntil: now + 60_000, deferToQueue: true, pendingPermissionCount: 1, lifecycle: "working" }),
+      now,
+    );
+    expect(view).toMatchObject({
+      column: "deferred",
+      deferredUntil: now + 60_000,
+      deferToQueue: true,
+      needsAttention: false,
+      effectiveStatus: "waiting_for_user",
+    });
+  });
+
+  it("keeps an in-place defer in its column but still counts no attention", () => {
+    const now = 1_000;
+    const view = projectView(
+      record({ deferredUntil: now + 60_000, deferToQueue: false, pendingPermissionCount: 1 }),
+      now,
+    );
+    expect(view).toMatchObject({ column: "waiting_for_user", deferToQueue: false, needsAttention: false });
+  });
+
+  it("treats an expired defer as not deferred", () => {
+    const now = 1_000;
+    const view = projectView(
+      record({ deferredUntil: now - 1, deferToQueue: true, pendingPermissionCount: 1 }),
+      now,
+    );
+    expect(view).toMatchObject({
+      column: "waiting_for_user",
+      deferredUntil: null,
+      deferToQueue: false,
+      needsAttention: true,
+    });
+  });
+
+  it("clears the defer in the view for non-live sessions", () => {
+    const now = 1_000;
+    const view = projectView(
+      record({ liveness: "closed", deferredUntil: now + 60_000, deferToQueue: true }),
+      now,
+    );
+    expect(view).toMatchObject({ column: "closed", deferredUntil: null, deferToQueue: false });
+  });
+
+  it("projects a restart-interrupted dormant session into the needs-action column", () => {
+    const view = projectView(
+      record({ liveness: "dormant", interruptedAt: 5, analysis: analysis("completed") }),
+    );
+    expect(view).toMatchObject({
+      column: "waiting_for_user",
+      effectiveStatus: "waiting_for_user",
+      liveness: "dormant",
+      needsAttention: true,
+    });
+  });
+
+  it("projects dormant sessions into status columns and honors deferrals", () => {
+    const now = 1_000;
+    const deferred = projectView(
+      record({ liveness: "dormant", deferredUntil: now + 60_000, deferToQueue: true }),
+      now,
+    );
+    expect(deferred).toMatchObject({ column: "deferred", liveness: "dormant" });
+    const plain = projectView(record({ liveness: "dormant", analysis: analysis("completed") }), now);
+    expect(plain).toMatchObject({ column: "completed", needsAttention: false });
+  });
+
+  it("manual override still beats the interruption flag on dormant sessions", () => {
+    const view = projectView(
+      record({ liveness: "dormant", manualStatusOverride: "completed", interruptedAt: 1 }),
+    );
+    expect(view).toMatchObject({ effectiveStatus: "completed", column: "completed" });
+  });
+
   it("exposes turn count and the first line of the last user input", () => {
     const turn = (id: string, userInput: string) => ({
       id,

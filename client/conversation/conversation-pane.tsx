@@ -3,13 +3,16 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   Text,
   View,
+  type KeyboardEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
@@ -17,14 +20,31 @@ import { stopAgentRpc } from "../../shared/rpc";
 import { errorText } from "../styles";
 import { SNAPSHOT_QUERY_KEY } from "../use-snapshot";
 import { Composer, type SendMode } from "./composer";
+import { useComposerDraft } from "./drafts";
 import { isNearBottom } from "./model";
+import {
+  enqueueMessage,
+  popQueuedMessage,
+  queueFor,
+  removeQueuedMessage,
+  useQueuedMessages,
+  type QueuedMessage,
+} from "./queue";
 import { PermissionCards } from "./permission-cards";
 import { responseFor, visiblePermissions, type PermissionChoice } from "./permissions";
 import { RowView } from "./rows";
 import { useConversation } from "./use-conversation";
 
-export function ConversationPane(props: { sessionId: string; theme: PluginTheme; live: boolean }) {
-  const { sessionId, theme, live } = props;
+/** Sessions whose queue is draining; module-level so a reopened pane never sends twice. */
+const flushingSessions = new Set<string>();
+
+export function ConversationPane(props: {
+  sessionId: string;
+  theme: PluginTheme;
+  live: boolean;
+  compact: boolean;
+}) {
+  const { sessionId, theme, live, compact } = props;
   const { colors } = theme;
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -32,12 +52,14 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
   const conversation = useConversation(sessionId);
   const { handle, state, agent } = conversation;
 
-  const [draft, setDraft] = useState("");
+  const { draft, setDraft } = useComposerDraft(sessionId);
+  const queued = useQueuedMessages(sessionId);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [stuck, setStuck] = useState(true);
+  const [keyboardInset, setKeyboardInset] = useState(0);
   const stuckRef = useRef(true);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -46,6 +68,20 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
       return queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
     },
     [queryClient],
+  );
+
+  // A successful tail load also resumes a dormant agent daemon-side; one board
+  // invalidation flips the card back to live without waiting for the next poll.
+  const loadNotified = useRef(false);
+  useEffect(
+    function notifyLoaded() {
+      if (loadNotified.current || conversation.loading || conversation.error !== null) {
+        return;
+      }
+      loadNotified.current = true;
+      void invalidateBoard();
+    },
+    [conversation.loading, conversation.error, invalidateBoard],
   );
 
   function onScroll(event: NativeSyntheticEvent<NativeScrollEvent>): void {
@@ -78,6 +114,11 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
     if (text === "" || sending) {
       return;
     }
+    if (mode === "queue") {
+      enqueueMessage(sessionId, text);
+      setDraft("");
+      return;
+    }
     setSending(true);
     try {
       if (mode === "send") {
@@ -93,6 +134,82 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
     } finally {
       setSending(false);
     }
+  }
+
+  // Queued messages go out in order once the agent's turn ends (or is absent).
+  const running = agent.running;
+  const runningRef = useRef(running);
+  runningRef.current = running;
+  const refreshRef = useRef(conversation.refreshAgent);
+  refreshRef.current = conversation.refreshAgent;
+  useEffect(
+    function flushQueue() {
+      if (running || flushingSessions.has(sessionId) || queueFor(sessionId).length === 0) {
+        return;
+      }
+      flushingSessions.add(sessionId);
+      const drain = async function drain(): Promise<void> {
+        try {
+          for (;;) {
+            if (runningRef.current) {
+              return;
+            }
+            const next = queueFor(sessionId)[0];
+            if (!next) {
+              return;
+            }
+            await handle.send(next.text);
+            removeQueuedMessage(sessionId, next.id);
+            if (queueFor(sessionId).length === 0) {
+              return;
+            }
+            // The daemon interrupts a running turn by default, so the next
+            // message waits for this one's turn; permission, error or timeout
+            // leaves the rest queued until the agent is idle again.
+            const finished = await handle.waitForFinish();
+            if (finished.status !== "idle") {
+              return;
+            }
+          }
+        } catch (error) {
+          toast.error(`排队消息发送失败：${errorText(error)}`);
+        } finally {
+          flushingSessions.delete(sessionId);
+          void refreshRef.current();
+          void invalidateBoard();
+        }
+      };
+      void drain();
+    },
+    [running, sessionId, handle, toast, invalidateBoard],
+  );
+
+  // Lift the composer by the real keyboard height; on hosts without a
+  // software keyboard these events simply never fire.
+  useEffect(function watchKeyboard() {
+    const showEvent = Platform.OS === "android" ? "keyboardDidShow" : "keyboardWillShow";
+    const hideEvent = Platform.OS === "android" ? "keyboardDidHide" : "keyboardWillHide";
+    const show = Keyboard.addListener(showEvent, function onShow(event: KeyboardEvent) {
+      setKeyboardInset(event.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener(hideEvent, function onHide() {
+      setKeyboardInset(0);
+    });
+    return function off() {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
+  function editQueued(message: QueuedMessage): void {
+    const text = popQueuedMessage(sessionId, message.id);
+    if (text !== null) {
+      setDraft(draft.trim() === "" ? text : `${draft}\n${text}`);
+    }
+  }
+
+  function dropQueued(message: QueuedMessage): void {
+    removeQueuedMessage(sessionId, message.id);
   }
 
   async function stop(): Promise<void> {
@@ -131,7 +248,6 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
   }
 
   const pending = visiblePermissions(agent.pending, answered);
-  const running = agent.running;
 
   let content;
   if (conversation.loading) {
@@ -179,7 +295,7 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
           </Text>
         ) : null}
         {state.rows.map(function renderRow(row) {
-          return <RowView key={row.key} theme={theme} row={row} />;
+          return <RowView key={row.key} theme={theme} row={row} compact={compact} />;
         })}
         {running ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -240,6 +356,8 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
           style={{ flex: 1 }}
           contentContainerStyle={{ padding: 12, gap: 10 }}
           scrollEventThrottle={32}
+          keyboardDismissMode="interactive"
+          keyboardShouldPersistTaps="handled"
           onScroll={onScroll}
           onContentSizeChange={onContentSizeChange}
         >
@@ -270,6 +388,7 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
         style={{
           gap: 8,
           padding: 12,
+          paddingBottom: 12 + keyboardInset,
           borderTopWidth: 1,
           borderTopColor: colors.border,
         }}
@@ -289,9 +408,12 @@ export function ConversationPane(props: { sessionId: string; theme: PluginTheme;
           live={live}
           running={running}
           sending={sending}
+          queued={queued}
           onSend={function onSend(mode) {
             void send(mode);
           }}
+          onEditQueued={editQueued}
+          onRemoveQueued={dropQueued}
         />
       </View>
     </View>

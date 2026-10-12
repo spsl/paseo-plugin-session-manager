@@ -36,6 +36,8 @@ describe("JsonStateStore", () => {
       firstUserMessage: "hello",
       firstUserMessageKnown: true,
       manualStatusOverride: "completed",
+      deferredUntil: 9_999,
+      deferToQueue: true,
       titleState: { lastWritten: "x", userOwned: true, lastWriteError: null },
       analysisState: "ready",
     });
@@ -82,6 +84,35 @@ describe("JsonStateStore", () => {
     await writeFile(path, JSON.stringify({ version: 1, sessions: [null, { id: 3 }, { id: "ok", analysisState: "ready", updatedAt: 1 }] }));
     const loaded = await new JsonStateStore(path).load();
     expect(loaded.map((record) => record.id)).toEqual(["ok"]);
+    // Legacy records predate the resume fields: they hydrate to idle/null.
+    expect(loaded[0]).toMatchObject({
+      deferredUntil: null,
+      deferToQueue: false,
+      interruptedAt: null,
+      resumeState: "idle",
+      resumeError: null,
+    });
+  });
+
+  it("persists dormant and interruptedAt but resets runtime resume fields on load", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    store.schedule(() => [
+      make("a", {
+        liveness: "dormant",
+        interruptedAt: 7,
+        resumeState: "resuming",
+        resumeError: "恢复失败：x",
+      }),
+    ]);
+    await store.flush();
+    const [loaded] = await new JsonStateStore(path).load();
+    expect(loaded).toMatchObject({
+      liveness: "dormant",
+      interruptedAt: 7,
+      resumeState: "idle",
+      resumeError: null,
+    });
   });
 
   it("writes the file with mode 0600", async () => {

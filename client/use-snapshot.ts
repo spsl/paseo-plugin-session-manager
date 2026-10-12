@@ -9,19 +9,27 @@ import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-quer
 import { useCallback, useMemo } from "react";
 import {
   applyGeneratedTitleRpc,
+  clearDeferRpc,
   clearManualStatusRpc,
+  deferRpc,
   detailRpc,
+  dismissResumeRpc,
   forgetRpc,
   reanalyzeRpc,
+  resumeRpc,
   setManualStatusRpc,
   snapshotRpc,
 } from "../shared/rpc";
 import type { AnalysisStatus } from "../shared/types";
 import {
+  patchClearDefer,
   patchClearManualStatus,
+  patchDefer,
+  patchDismissResume,
   patchForget,
   patchManualStatus,
   patchReanalyze,
+  patchResume,
   pollIntervalFor,
 } from "./board-model";
 
@@ -90,9 +98,13 @@ async function refresh(queryClient: QueryClient, sessionId: string): Promise<voi
 export type SessionActions = {
   setManualStatus(sessionId: string, status: AnalysisStatus): Promise<boolean>;
   clearManualStatus(sessionId: string): Promise<boolean>;
+  defer(sessionId: string, durationMs: number, toQueue: boolean): Promise<boolean>;
+  clearDefer(sessionId: string): Promise<boolean>;
   reanalyze(sessionId: string): Promise<boolean>;
   applyGeneratedTitle(sessionId: string): Promise<boolean>;
   forget(sessionId: string): Promise<boolean>;
+  resume(sessionId: string): Promise<boolean>;
+  dismissResume(sessionId: string): Promise<boolean>;
 };
 
 export function useSessionActions(): SessionActions {
@@ -100,9 +112,13 @@ export function useSessionActions(): SessionActions {
   const toast = useToast();
   const setStatus = useRpc(setManualStatusRpc);
   const clearStatus = useRpc(clearManualStatusRpc);
+  const deferCall = useRpc(deferRpc);
+  const clearDeferCall = useRpc(clearDeferRpc);
   const reanalyzeCall = useRpc(reanalyzeRpc);
   const applyTitle = useRpc(applyGeneratedTitleRpc);
   const forgetCall = useRpc(forgetRpc);
+  const resumeCall = useRpc(resumeRpc);
+  const dismissResumeCall = useRpc(dismissResumeRpc);
 
   const run = useCallback(
     async function run(
@@ -158,6 +174,30 @@ export function useSessionActions(): SessionActions {
             },
           );
         },
+        defer(sessionId, durationMs, toQueue) {
+          return run(
+            sessionId,
+            "延迟设置失败",
+            function optimistic(snapshot) {
+              return patchDefer(snapshot, sessionId, Date.now() + durationMs, toQueue);
+            },
+            function call() {
+              return deferCall({ sessionId, durationMs, toQueue });
+            },
+          );
+        },
+        clearDefer(sessionId) {
+          return run(
+            sessionId,
+            "恢复显示失败",
+            function optimistic(snapshot) {
+              return patchClearDefer(snapshot, sessionId);
+            },
+            function call() {
+              return clearDeferCall({ sessionId });
+            },
+          );
+        },
         reanalyze(sessionId) {
           return run(
             sessionId,
@@ -187,8 +227,43 @@ export function useSessionActions(): SessionActions {
             },
           );
         },
+        resume(sessionId) {
+          return run(
+            sessionId,
+            "恢复失败",
+            function optimistic(snapshot) {
+              return patchResume(snapshot, sessionId);
+            },
+            function call() {
+              return resumeCall({ sessionId });
+            },
+          );
+        },
+        dismissResume(sessionId) {
+          return run(
+            sessionId,
+            "操作失败",
+            function optimistic(snapshot) {
+              return patchDismissResume(snapshot, sessionId);
+            },
+            function call() {
+              return dismissResumeCall({ sessionId });
+            },
+          );
+        },
       };
     },
-    [run, setStatus, clearStatus, reanalyzeCall, applyTitle, forgetCall],
+    [
+      run,
+      setStatus,
+      clearStatus,
+      deferCall,
+      clearDeferCall,
+      reanalyzeCall,
+      applyTitle,
+      forgetCall,
+      resumeCall,
+      dismissResumeCall,
+    ],
   );
 }

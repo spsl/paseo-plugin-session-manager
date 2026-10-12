@@ -3,7 +3,11 @@ import {
   analysisStatusLabel,
   branchLabel,
   columnForStatus,
+  formatDeferRemaining,
+  formatDeferUntil,
   formatShortTimeAgo,
+  livenessLabel,
+  resumeStateLabel,
   sessionTitle,
   workspaceLabel,
 } from "./presentation";
@@ -52,5 +56,32 @@ describe("board presentation", () => {
     expect(formatShortTimeAgo(0, 5 * 60_000)).toBe("5分钟前");
     expect(formatShortTimeAgo(0, 3 * 3_600_000)).toBe("3小时前");
     expect(formatShortTimeAgo(0, 2 * 86_400_000)).toBe("2天前");
+  });
+
+  it("labels dormant sessions 未连接 and reports resume progress", () => {
+    expect(livenessLabel("dormant")).toBe("未连接");
+    expect(livenessLabel("live")).toBe("活跃");
+    expect(resumeStateLabel(makeSession({ liveness: "dormant" }))).toBe("未连接");
+    expect(resumeStateLabel(makeSession({ liveness: "dormant", resumeState: "queued" }))).toBe(
+      "恢复中…",
+    );
+    expect(resumeStateLabel(makeSession({ liveness: "dormant", resumeState: "resuming" }))).toBe(
+      "恢复中…",
+    );
+    expect(resumeStateLabel(makeSession({ liveness: "dormant", resumeState: "failed" }))).toBe(
+      "恢复失败",
+    );
+    expect(resumeStateLabel(makeSession({ resumeState: "failed" }))).toBeNull();
+  });
+
+  it("formats the defer countdown and resume time", () => {
+    const now = new Date(2026, 5, 15, 10, 30, 0).getTime();
+    expect(formatDeferRemaining(now - 1, now)).toBe("即将恢复");
+    expect(formatDeferRemaining(now + 30 * 60_000, now)).toBe("剩余 30 分钟");
+    expect(formatDeferRemaining(now + 5 * 3_600_000, now)).toBe("剩余 5 小时");
+    expect(formatDeferRemaining(now + 3 * 86_400_000, now)).toBe("剩余 3 天");
+
+    expect(formatDeferUntil(now + 3_600_000, now)).toBe("11:30");
+    expect(formatDeferUntil(now + 40 * 3_600_000, now)).toBe("6月17日 02:30");
   });
 });

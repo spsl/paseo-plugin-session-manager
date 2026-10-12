@@ -4,7 +4,14 @@ import {
 } from "../shared/analysis-config";
 import { isExcludedAgent, parseExclusions, type AgentExclusion } from "../shared/agent-filter";
 import type { AnalyzerSettings } from "../shared/settings";
-import type { Analysis, AnalysisStatus, SessionDetail, SessionView, Turn } from "../shared/types";
+import {
+  isActiveLiveness,
+  type Analysis,
+  type AnalysisStatus,
+  type SessionDetail,
+  type SessionView,
+  type Turn,
+} from "../shared/types";
 import { CliAnalyzer, DEFAULT_ANALYZER_TIMEOUT_MS, type Analyzer } from "./analyzer/analyzer";
 import { MagpieAnalyzer } from "./analyzer/magpie";
 import type { MagpieRunConfig } from "./analyzer/magpie";
@@ -45,6 +52,11 @@ const SEED_TIMELINE_LIMIT = 300;
 const PROBLEM_CACHE_MS = 30_000;
 const DAY_MS = 86_400_000;
 const MAX_TRACKED_GATES = 300;
+/** agent.closed within this window of shutdown is treated as restart-caused. */
+const SHUTDOWN_CLOSE_WINDOW_MS = 30_000;
+const RESUME_CONCURRENCY = 3;
+const RESUME_TIMEOUT_MS = 60_000;
+const RESUME_TIMEOUT_TEXT = "恢复超时（60 秒）";
 /** Another plugin's helper agents are never carded or announced, whatever the board setting says. */
 const NEVER_NOTIFY = parseExclusions("herald.role");
 
@@ -109,6 +121,15 @@ function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
   return { promise, cancel: () => clearTimeout(timer) };
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export class SessionManagerService {
   private readonly records = new Map<string, SessionRecord>();
   private readonly queue: string[] = [];
@@ -120,9 +141,22 @@ export class SessionManagerService {
   private paseo: PaseoApi | null = null;
   private reconcileInFlight: Promise<void> | null = null;
   private lastReconcileAt = 0;
+  /** True once the first successful agents.list pass ran since startup. */
+  private reconciledOnce = false;
+  private loadDone = false;
+  /** The startup load; reconcile waits for it so persisted state is never shadowed. */
+  private loading: Promise<unknown> | null = null;
   private seedStarted = false;
   private seeding = false;
   private stopped = false;
+  /** agent.closed seen recently; prepareShutdown turns the active ones dormant. */
+  private readonly recentClosures = new Map<
+    string,
+    { at: number; wasActive: boolean; interrupted: boolean }
+  >();
+  private readonly resumeTasks = new Map<string, Promise<MutationResult>>();
+  private autoResumeStarted = false;
+  private autoResumeDone: Promise<void> | null = null;
   private problemCache: { key: string; at: number; value: string | null } | null = null;
   private readonly idleWaiters: Array<() => void> = [];
   private readonly labelProbes = new Map<string, Promise<void>>();
@@ -164,12 +198,19 @@ export class SessionManagerService {
     return count;
   }
 
-  async load(): Promise<number> {
+  load(): Promise<number> {
+    const pending = this.loadRecords();
+    this.loading = pending;
+    return pending;
+  }
+
+  private async loadRecords(): Promise<number> {
     const restored = await this.deps.store.load();
     const count = this.restore(restored);
     if (count > 0) {
       this.persist();
     }
+    this.loadDone = true;
     return count;
   }
 
@@ -391,6 +432,10 @@ export class SessionManagerService {
     const record = this.ensure(event.agent);
     record.liveness = "live";
     record.lifecycle = "working";
+    // A new turn means the restart interruption is being worked through.
+    record.interruptedAt = null;
+    record.resumeState = "idle";
+    record.resumeError = null;
     record.updatedAt = this.now();
     this.persist();
   }
@@ -474,6 +519,9 @@ export class SessionManagerService {
     record.updatedAt = now;
     record.liveness = record.liveness === "archived" ? "archived" : "live";
     record.lifecycle = event.outcome.kind === "failed" ? "error" : "idle";
+    record.interruptedAt = null;
+    record.resumeState = "idle";
+    record.resumeError = null;
     record.pendingPermissionCount = 0;
     if (record.attentionReason === "permission") {
       record.attentionReason = null;
@@ -518,6 +566,10 @@ export class SessionManagerService {
 
   onClosed(event: ClosedEvent): void {
     const record = this.ensure(event.agent);
+    // Captured before the fields are cleared: prepareShutdown needs the state
+    // the session had when the close arrived (a daemon shutdown closes all
+    // loaded agents at once, indistinguishable from user closes otherwise).
+    this.noteRecentClosure(record);
     if (record.liveness !== "archived") {
       record.liveness = "closed";
     }
@@ -526,12 +578,56 @@ export class SessionManagerService {
     this.persist();
   }
 
+  private noteRecentClosure(record: SessionRecord): void {
+    const now = this.now();
+    this.recentClosures.set(record.id, {
+      at: now,
+      wasActive: isActiveLiveness(record.liveness),
+      interrupted: record.lifecycle === "working" || record.pendingPermissionCount > 0,
+    });
+    for (const [id, entry] of this.recentClosures) {
+      if (now - entry.at > SHUTDOWN_CLOSE_WINDOW_MS) {
+        this.recentClosures.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Runs from the plugin cleanup, after the daemon's closeAllAgents hooks
+   * landed: agents closed just now were shut down with Paseo, not by the
+   * user, so they become dormant (resumable) instead of closed.
+   */
+  prepareShutdown(): void {
+    const now = this.now();
+    let changed = false;
+    for (const [id, closure] of this.recentClosures) {
+      if (now - closure.at > SHUTDOWN_CLOSE_WINDOW_MS || !closure.wasActive) {
+        continue;
+      }
+      const record = this.records.get(id);
+      if (!record || record.liveness !== "closed") {
+        continue;
+      }
+      record.liveness = "dormant";
+      if (closure.interrupted) {
+        record.interruptedAt = closure.at;
+      }
+      changed = true;
+    }
+    this.recentClosures.clear();
+    if (changed) {
+      this.persist();
+    }
+  }
+
   onArchived(event: ArchivedEvent): void {
     const record = this.ensure(event.agent);
     record.liveness = "archived";
     const at = Date.parse(event.archivedAt);
     record.archivedAt = Number.isFinite(at) ? at : this.now();
     record.pendingPermissionCount = 0;
+    record.deferredUntil = null;
+    record.deferToQueue = false;
     record.updatedAt = this.now();
     this.persist();
   }
@@ -791,7 +887,7 @@ export class SessionManagerService {
     if (!record) {
       return { ok: false, reason: "会话不存在" };
     }
-    if (record.liveness !== "live") {
+    if (!isActiveLiveness(record.liveness)) {
       return { ok: false, reason: "会话已关闭，无法调整状态" };
     }
     record.manualStatusOverride = status;
@@ -805,6 +901,31 @@ export class SessionManagerService {
       return { ok: false, reason: "会话不存在" };
     }
     record.manualStatusOverride = null;
+    this.persist();
+    return { ok: true };
+  }
+
+  defer(id: string, durationMs: number, toQueue: boolean): MutationResult {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    if (!isActiveLiveness(record.liveness)) {
+      return { ok: false, reason: "会话已关闭，无法延迟显示" };
+    }
+    record.deferredUntil = this.now() + durationMs;
+    record.deferToQueue = toQueue;
+    this.persist();
+    return { ok: true };
+  }
+
+  clearDefer(id: string): MutationResult {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    record.deferredUntil = null;
+    record.deferToQueue = false;
     this.persist();
     return { ok: true };
   }
@@ -837,6 +958,189 @@ export class SessionManagerService {
     this.records.delete(id);
     this.persist();
     return { ok: true };
+  }
+
+  // ---- resume after a Paseo restart --------------------------------------
+
+  /**
+   * Resumes a dormant session by asking the daemon for its timeline tail;
+   * fetching an unloaded agent resumes the provider session Paseo-side.
+   */
+  resume(id: string): Promise<MutationResult> {
+    const record = this.records.get(id);
+    if (!record) {
+      return Promise.resolve({ ok: false, reason: "会话不存在" });
+    }
+    if (record.liveness !== "dormant") {
+      return Promise.resolve({ ok: false, reason: "会话未处于待恢复状态" });
+    }
+    const inFlight = this.resumeTasks.get(id);
+    if (inFlight) {
+      return inFlight;
+    }
+    const paseo = this.paseo;
+    if (!paseo) {
+      return Promise.resolve({ ok: false, reason: "尚未连接到 Paseo" });
+    }
+    record.resumeState = "resuming";
+    record.resumeError = null;
+    this.persist();
+    const task = this.resumeRun(paseo, id).finally(() => {
+      this.resumeTasks.delete(id);
+    });
+    this.resumeTasks.set(id, task);
+    return task;
+  }
+
+  /** Marks a dormant session as deliberately closed; never auto-resumed. */
+  dismissResume(id: string): MutationResult {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    if (record.liveness !== "dormant") {
+      return { ok: false, reason: "会话未处于待恢复状态" };
+    }
+    record.liveness = "closed";
+    record.interruptedAt = null;
+    record.resumeState = "idle";
+    record.resumeError = null;
+    record.deferredUntil = null;
+    record.deferToQueue = false;
+    record.updatedAt = this.now();
+    this.persist();
+    return { ok: true };
+  }
+
+  private async resumeRun(paseo: PaseoApi, id: string): Promise<MutationResult> {
+    try {
+      const payload = await withTimeout(
+        paseo.agents.ref(id).timeline.refetch({
+          direction: "tail",
+          limit: 1,
+          projection: "projected",
+        }),
+        RESUME_TIMEOUT_MS,
+        RESUME_TIMEOUT_TEXT,
+      );
+      const record = this.records.get(id);
+      if (!record) {
+        return { ok: false, reason: "会话不存在" };
+      }
+      if (record.liveness === "closed") {
+        // Dismissed while the refetch was in flight; keep it closed.
+        return { ok: false, reason: "会话已标记为不再恢复" };
+      }
+      const agent = payload.agent ?? null;
+      if (agent) {
+        applyAgentSnapshot(record, agent);
+      } else {
+        // No snapshot in the payload: ask the registry what it now reports.
+        void this.reconcile().catch((error: unknown) => {
+          console.warn("[session-manager] reconcile after resume failed", error);
+        });
+      }
+      record.resumeState = "idle";
+      record.resumeError = null;
+      this.persist();
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const reason =
+        message.trim() === RESUME_TIMEOUT_TEXT
+          ? RESUME_TIMEOUT_TEXT
+          : `恢复失败：${describeAnalysisError(error)}`;
+      const record = this.records.get(id);
+      if (record) {
+        record.resumeState = "failed";
+        record.resumeError = reason;
+        this.persist();
+      }
+      return { ok: false, reason };
+    }
+  }
+
+  /** Starts the once-per-process auto resume after the first reconcile. */
+  private maybeStartAutoResume(): void {
+    if (
+      this.autoResumeStarted ||
+      this.stopped ||
+      !this.paseo ||
+      !this.loadDone ||
+      !this.reconciledOnce
+    ) {
+      return;
+    }
+    this.autoResumeStarted = true;
+    this.autoResumeDone = this.runAutoResume();
+  }
+
+  /** Resolves when the startup auto-resume pass finishes (tests). */
+  waitForResume(): Promise<void> {
+    return this.autoResumeDone ?? Promise.resolve();
+  }
+
+  private async runAutoResume(): Promise<void> {
+    const policy = this.deps.settings.current().autoResume;
+    if (policy === "off") {
+      return;
+    }
+    const now = this.now();
+    const dormant = [...this.records.values()].filter(
+      (record) => record.liveness === "dormant" && !this.isExcludedRecord(record),
+    );
+    if (dormant.length === 0) {
+      return;
+    }
+    const candidates = dormant
+      .map((record) => ({ record, column: projectView(record, now).column }))
+      .filter(({ record, column }) => {
+        if (policy === "attention") {
+          return column === "waiting_for_user" || column === "in_progress";
+        }
+        // "all": everything except sessions parked in the defer queue.
+        return !(
+          record.deferToQueue &&
+          record.deferredUntil !== null &&
+          record.deferredUntil > now
+        );
+      })
+      .sort((left, right) => {
+        const rank = (column: string): number => (column === "waiting_for_user" ? 0 : 1);
+        return rank(left.column) - rank(right.column) || right.record.updatedAt - left.record.updatedAt;
+      });
+    for (const { record } of candidates) {
+      record.resumeState = "queued";
+    }
+    if (candidates.length > 0) {
+      this.persist();
+    }
+    const pending = candidates.map(({ record }) => record.id);
+    let ok = 0;
+    let failed = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (this.stopped) {
+          return;
+        }
+        const id = pending.shift();
+        if (id === undefined) {
+          return;
+        }
+        const result = await this.resume(id);
+        if (result.ok) {
+          ok += 1;
+        } else {
+          failed += 1;
+        }
+      }
+    };
+    const workers: Promise<void>[] = [];
+    for (let index = 0; index < Math.min(RESUME_CONCURRENCY, pending.length); index += 1) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+    console.log(`[session-manager] resume: ${candidates.length} queued, ${ok} ok, ${failed} failed`);
   }
 
   async testAnalyzer(): Promise<{ ok: boolean; durationMs: number; title?: string; error?: string }> {
@@ -876,7 +1180,7 @@ export class SessionManagerService {
 
   detail(id: string): SessionDetail | null {
     const record = this.records.get(id);
-    return record ? projectDetail(record) : null;
+    return record ? projectDetail(record, this.now()) : null;
   }
 
   // ---- snapshot / reconcile / seed -------------------------------------
@@ -891,17 +1195,21 @@ export class SessionManagerService {
     }
     const settings = this.deps.settings.current();
     const config = normalizeAnalysisConfig(settings);
-    const cutoff = this.now() - settings.closedRetentionDays * DAY_MS;
+    const now = this.now();
+    const cutoff = now - settings.closedRetentionDays * DAY_MS;
     const sessions = [...this.records.values()]
       .filter(
         (record) =>
           !this.isExcludedRecord(record) &&
-          (record.liveness === "live" || (record.archivedAt ?? record.updatedAt) >= cutoff),
+          (isActiveLiveness(record.liveness) ||
+            (record.archivedAt ?? record.updatedAt) >= cutoff),
       )
-      .map(projectView)
+      .map(function project(record) {
+        return projectView(record, now);
+      })
       .sort((left, right) => right.updatedAt - left.updatedAt);
     return {
-      generatedAt: this.now(),
+      generatedAt: now,
       sessions,
       analyzer: {
         enabled: settings.enabled,
@@ -933,6 +1241,7 @@ export class SessionManagerService {
         })
         .finally(() => {
           this.reconcileInFlight = null;
+          this.maybeStartAutoResume();
           if (!this.seedStarted && this.paseo) {
             this.seedStarted = true;
             void this.seed();
@@ -947,6 +1256,9 @@ export class SessionManagerService {
     if (!paseo) {
       return;
     }
+    // Records created here before the load lands would hide the persisted ones
+    // (restore skips known ids), losing dormant state and analyses on startup.
+    await this.loading?.catch(() => undefined);
     const knownBefore = new Set(this.records.keys());
     const entries: AgentListEntry[] = [];
     let cursor: string | undefined;
@@ -981,7 +1293,20 @@ export class SessionManagerService {
         continue;
       }
       if (existing) {
-        changed = applyAgentSnapshot(existing, agent, entry.project) || changed;
+        // First reconcile after a plugin/daemon restart: a persisted live
+        // record whose agent now reports closed went down with the daemon.
+        const crashRecovery = !this.reconciledOnce && existing.liveness === "live";
+        const interrupted =
+          crashRecovery &&
+          (existing.lifecycle === "working" || existing.pendingPermissionCount > 0);
+        changed =
+          applyAgentSnapshot(existing, agent, entry.project, {
+            dormantOnClosed: crashRecovery,
+          }) || changed;
+        if (interrupted && existing.liveness === "dormant" && existing.interruptedAt === null) {
+          existing.interruptedAt = this.now();
+          changed = true;
+        }
         continue;
       }
       const archivedAt = agent.archivedAt ? Date.parse(agent.archivedAt) : null;
@@ -999,6 +1324,8 @@ export class SessionManagerService {
         }
       }
     }
+    // A failed pass retries as "first" so crash recovery still applies.
+    this.reconciledOnce = true;
     if (changed) {
       this.persist();
     }

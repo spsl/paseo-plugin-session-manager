@@ -2,12 +2,18 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   announcementsRpc,
   applyGeneratedTitleRpc,
+  clearDeferRpc,
   clearManualStatusRpc,
+  deferRpc,
   detailRpc,
+  draftGetRpc,
+  draftSetRpc,
   forgetRpc,
   magpieModelsRpc,
   mermaidRenderRpc,
   reanalyzeRpc,
+  resumeRpc,
+  dismissResumeRpc,
   piModelsRpc,
   setManualStatusRpc,
   snapshotRpc,
@@ -17,6 +23,7 @@ import {
   testAnalyzerRpc,
 } from "../shared/rpc";
 import type { AnnouncementFeed } from "./announcements";
+import type { DraftStore } from "./drafts";
 import { DEFAULT_MAGPIE_BASE_URL } from "./analyzer/magpie";
 import { renderMermaid } from "./mermaid";
 import { listMagpieModels, listPiModels } from "./pi-models";
@@ -28,6 +35,7 @@ export function registerRpcHandlers(
   server: PluginServerContext,
   service: SessionManagerService,
   feed: AnnouncementFeed,
+  drafts: DraftStore,
 ): void {
   server.handle(announcementsRpc, (input, ctx) => {
     service.touchPaseo(ctx.paseo);
@@ -73,6 +81,14 @@ export function registerRpcHandlers(
     service.touchPaseo(ctx.paseo);
     return service.clearManualStatus(input.sessionId);
   });
+  server.handle(deferRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.defer(input.sessionId, input.durationMs, input.toQueue);
+  });
+  server.handle(clearDeferRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.clearDefer(input.sessionId);
+  });
   server.handle(applyGeneratedTitleRpc, async (input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return service.applyGeneratedTitle(input.sessionId);
@@ -81,9 +97,26 @@ export function registerRpcHandlers(
     service.touchPaseo(ctx.paseo);
     return service.forget(input.sessionId);
   });
+  server.handle(resumeRpc, async (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.resume(input.sessionId);
+  });
+  server.handle(dismissResumeRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.dismissResume(input.sessionId);
+  });
   server.handle(stopAgentRpc, async (input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return stopAgentViaCli(input.sessionId);
+  });
+  server.handle(draftGetRpc, async (input) => {
+    await drafts.load();
+    return { draft: drafts.get(input.sessionId) };
+  });
+  server.handle(draftSetRpc, async (input) => {
+    await drafts.load();
+    drafts.set(input.sessionId, input.draft);
+    return { ok: true };
   });
   server.handle(testAnalyzerRpc, async (_input, ctx) => {
     service.touchPaseo(ctx.paseo);

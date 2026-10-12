@@ -9,12 +9,16 @@ import {
   analysisStatusLabel,
   branchLabel,
   columnForStatus,
+  formatDeferRemaining,
+  formatDeferUntil,
   lifecycleLabel,
   livenessLabel,
+  RESTART_INTERRUPTED_TEXT,
+  resumeStateLabel,
   STATUS_OPTIONS,
   workspaceLabel,
 } from "../shared/presentation";
-import type { SessionDetail, Turn } from "../shared/types";
+import { isActiveLiveness, type SessionDetail, type Turn } from "../shared/types";
 import { Badge, Chip } from "./badge";
 import { columnTone, errorText, formatDateTime, statusTone } from "./styles";
 import { SNAPSHOT_QUERY_KEY, useSessionActions } from "./use-snapshot";
@@ -192,15 +196,21 @@ export function useDetailActions(props: {
   };
 }
 
-export function DetailContent(props: { session: SessionDetail; theme: PluginTheme }) {
+export function DetailContent(props: {
+  session: SessionDetail;
+  theme: PluginTheme;
+  onDefer?(): void;
+}) {
   const { session, theme } = props;
   const { colors } = theme;
   const actions = useSessionActions();
   const [showTurns, setShowTurns] = useState(false);
 
-  const live = session.liveness === "live";
+  const active = isActiveLiveness(session.liveness);
+  const dormant = session.liveness === "dormant";
   const analysis = session.analysis;
   const turns = [...session.turns].reverse();
+  const resuming = session.resumeState === "queued" || session.resumeState === "resuming";
 
   const statusColumn = columnForStatus(session.effectiveStatus);
   const metadata: [string, string][] = [
@@ -224,13 +234,58 @@ export function DetailContent(props: { session: SessionDetail; theme: PluginThem
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
           <Badge
             theme={theme}
-            label={live ? analysisStatusLabel(session.effectiveStatus) : "已关闭"}
-            tone={live ? statusTone(theme, session.effectiveStatus) : columnTone(theme, "closed")}
+            label={active ? analysisStatusLabel(session.effectiveStatus) : "已关闭"}
+            tone={active ? statusTone(theme, session.effectiveStatus) : columnTone(theme, "closed")}
           />
+          {dormant ? (
+            <Badge
+              theme={theme}
+              label={resumeStateLabel(session) ?? "未连接"}
+              tone={session.resumeState === "failed" ? colors.statusDanger : colors.foregroundMuted}
+            />
+          ) : null}
           {session.manualStatusOverride ? (
             <Badge theme={theme} label="手工覆盖" tone={colors.foregroundMuted} />
           ) : null}
         </View>
+        {dormant ? (
+          <View style={{ gap: 8 }}>
+            {session.interruptedAt !== null ? (
+              <Text style={{ color: colors.statusWarning, fontSize: 12, lineHeight: 18 }}>
+                {RESTART_INTERRUPTED_TEXT}
+              </Text>
+            ) : (
+              <Text style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 }}>
+                Paseo 重启后此会话未连接，可恢复后继续。
+              </Text>
+            )}
+            {session.resumeError ? (
+              <Text style={{ color: colors.statusDanger, fontSize: 12, lineHeight: 18 }}>
+                {session.resumeError}
+              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              <Chip
+                theme={theme}
+                label={resuming ? "恢复中…" : session.resumeState === "failed" ? "重试" : "恢复"}
+                selected={false}
+                disabled={resuming}
+                onPress={function resume() {
+                  void actions.resume(session.id);
+                }}
+              />
+              <Chip
+                theme={theme}
+                label="不再恢复"
+                selected={false}
+                disabled={resuming}
+                onPress={function dismiss() {
+                  void actions.dismissResume(session.id);
+                }}
+              />
+            </View>
+          </View>
+        ) : null}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {STATUS_OPTIONS.map(function renderOption(option) {
             return (
@@ -239,15 +294,15 @@ export function DetailContent(props: { session: SessionDetail; theme: PluginThem
                 theme={theme}
                 label={option.label}
                 tone={statusTone(theme, option.status)}
-                selected={live && session.effectiveStatus === option.status}
-                disabled={!live}
+                selected={active && session.effectiveStatus === option.status}
+                disabled={!active}
                 onPress={function select() {
                   void actions.setManualStatus(session.id, option.status);
                 }}
               />
             );
           })}
-          {live && session.manualStatusOverride ? (
+          {active && session.manualStatusOverride ? (
             <Chip
               theme={theme}
               label="恢复自动状态"
@@ -258,8 +313,32 @@ export function DetailContent(props: { session: SessionDetail; theme: PluginThem
             />
           ) : null}
         </View>
+        {active && props.onDefer ? (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            {session.deferredUntil !== null ? (
+              <>
+                <Badge
+                  theme={theme}
+                  label={`延迟至 ${formatDeferUntil(session.deferredUntil, Date.now())} · ${formatDeferRemaining(session.deferredUntil, Date.now())}${session.deferToQueue ? " · 延迟队列" : " · 留原列"}`}
+                  tone={colors.foregroundMuted}
+                />
+                <Chip
+                  theme={theme}
+                  label="立即恢复"
+                  selected={false}
+                  onPress={function resume() {
+                    void actions.clearDefer(session.id);
+                  }}
+                />
+                <Chip theme={theme} label="重新设置" selected={false} onPress={props.onDefer} />
+              </>
+            ) : (
+              <Chip theme={theme} label="延迟显示…" selected={false} onPress={props.onDefer} />
+            )}
+          </View>
+        ) : null}
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
-          {live
+          {active
             ? session.manualStatusOverride
               ? "手工状态会覆盖当前分析，直到恢复自动状态。"
               : `当前归入「${statusColumn === "waiting_for_user" ? "需要处理" : analysisStatusLabel(session.effectiveStatus)}」列。`

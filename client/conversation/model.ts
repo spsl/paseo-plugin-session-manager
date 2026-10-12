@@ -3,6 +3,13 @@
  * Structural local types only (runtime code must not import @getpaseo/client|protocol).
  */
 
+import {
+  SESSION_CARD_KIND,
+  SESSION_CARD_VERSION,
+  SessionCardSchema,
+  type SessionCard,
+} from "../../shared/card";
+
 export type TimelineItemLike = { type: string; [key: string]: unknown };
 
 export type TodoEntry = { text: string; completed: boolean; inProgress: boolean };
@@ -21,6 +28,7 @@ export type Row =
       error: unknown;
     }
   | { kind: "todo"; key: string; items: TodoEntry[] }
+  | { kind: "session-card"; key: string; cardId: string; data: SessionCard }
   | { kind: "error"; key: string; message: string }
   | { kind: "note"; key: string; level: "info" | "warning" | "error" | "muted"; text: string };
 
@@ -155,6 +163,25 @@ export function appendItem(rows: readonly Row[], item: TimelineItemLike, seq?: n
         text: item.status === "completed" ? "上下文已压缩" : "正在压缩上下文…",
       });
       return next;
+    case "plugin": {
+      if (item.kind === SESSION_CARD_KIND && item.version === SESSION_CARD_VERSION) {
+        const parsed = SessionCardSchema.safeParse(item.data);
+        if (parsed.success) {
+          const cardId = `${str(item.pluginId) ?? ""}:${str(item.id) ?? key}`;
+          for (let index = next.length - 1; index >= 0; index -= 1) {
+            const candidate = next[index];
+            if (candidate?.kind === "session-card" && candidate.cardId === cardId) {
+              next[index] = { ...candidate, data: parsed.data };
+              return next;
+            }
+          }
+          next.push({ kind: "session-card", key, cardId, data: parsed.data });
+          return next;
+        }
+      }
+      next.push({ kind: "note", key, level: "muted", text: `插件事件 · ${str(item.kind) ?? item.type}` });
+      return next;
+    }
     default:
       next.push({ kind: "note", key, level: "muted", text: `插件事件 · ${item.type}` });
       return next;
@@ -213,7 +240,15 @@ export function mergeStreamEvent(state: ConversationState, payload: StreamPayloa
   }
   const seq = payload.seq;
   if (seq !== undefined && state.lastSeq !== null && seq <= state.lastSeq) {
-    return { state, refetch: false, changed: false };
+    // A re-appended plugin row can share a seen seq; still upsert it.
+    if (event.item.type !== "plugin") {
+      return { state, refetch: false, changed: false };
+    }
+    const replaced = appendItem(state.rows, event.item, seq);
+    const updated = replaced.some(function differs(row, index) {
+      return row !== state.rows[index];
+    });
+    return { state: updated ? { ...state, rows: replaced } : state, refetch: false, changed: updated };
   }
   const rows = appendItem(state.rows, event.item, seq);
   return {

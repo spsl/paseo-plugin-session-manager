@@ -47,6 +47,23 @@ export const clearManualStatusRpc = defineRpc({
   output: MutationOutput,
 });
 
+/** Defer a session's board display; `toQueue` parks it in the deferred column. */
+export const deferRpc = defineRpc({
+  name: "session-manager.defer",
+  input: z.object({
+    sessionId: z.string(),
+    durationMs: z.number().int().positive().max(30 * 24 * 60 * 60 * 1000),
+    toQueue: z.boolean(),
+  }),
+  output: MutationOutput,
+});
+
+export const clearDeferRpc = defineRpc({
+  name: "session-manager.clear_defer",
+  input: SessionIdInput,
+  output: MutationOutput,
+});
+
 export const applyGeneratedTitleRpc = defineRpc({
   name: "session-manager.apply_generated_title",
   input: SessionIdInput,
@@ -59,9 +76,37 @@ export const forgetRpc = defineRpc({
   output: MutationOutput,
 });
 
+/** Resume a dormant session (reconnects the agent Paseo closed on restart). */
+export const resumeRpc = defineRpc({
+  name: "session-manager.resume",
+  input: SessionIdInput,
+  output: MutationOutput,
+});
+
+/** Mark a dormant session as deliberately closed so it is never auto-resumed. */
+export const dismissResumeRpc = defineRpc({
+  name: "session-manager.dismiss_resume",
+  input: SessionIdInput,
+  output: MutationOutput,
+});
+
 export const stopAgentRpc = defineRpc({
   name: "session-manager.stop_agent",
   input: SessionIdInput,
+  output: MutationOutput,
+});
+
+/** The persisted composer draft of one session; `null` when none was saved. */
+export const draftGetRpc = defineRpc({
+  name: "session-manager.draft.get",
+  input: SessionIdInput,
+  output: z.object({ draft: z.string().nullable() }),
+});
+
+/** `draft` of `null` or blank clears the saved draft. */
+export const draftSetRpc = defineRpc({
+  name: "session-manager.draft.set",
+  input: z.object({ sessionId: z.string(), draft: z.string().nullable() }),
   output: MutationOutput,
 });
 

@@ -16,6 +16,7 @@ export function columnTone(theme: PluginTheme, column: BoardColumn): string {
     case "completed":
       return colors.statusSuccess;
     case "unclear":
+    case "deferred":
     case "closed":
       return colors.foregroundMuted;
   }

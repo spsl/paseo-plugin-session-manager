@@ -4,7 +4,7 @@ import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Pressable, Text, View } from "react-native";
 import { firstLine, sessionTitle } from "../shared/presentation";
 import { useSnapshotNudges } from "./agents-watch";
-import { attentionSessions } from "./board-model";
+import { attentionSessions, workspaceAttentionGroups } from "./board-model";
 import { toneBackground } from "./styles";
 import { useSnapshot } from "./use-snapshot";
 
@@ -13,42 +13,72 @@ export const BOARD_SCREEN_ID = "board";
 export function BoardSidebarItem({ theme, currentScreen, openScreen, openPopover }: PluginSidebarItemProps) {
   const snapshot = useSnapshot();
   useSnapshotNudges();
-  const count = (snapshot.data?.sessions ?? []).filter(function needs(session) {
+  const sessions = snapshot.data?.sessions ?? [];
+  const count = sessions.filter(function needs(session) {
     return session.needsAttention;
   }).length;
+  const workspaces = workspaceAttentionGroups(sessions).slice(0, 8);
   const warning = theme.colors.statusWarning;
 
+  function badge(value: number) {
+    return (
+      <View
+        style={{
+          minWidth: 18,
+          paddingHorizontal: 5,
+          paddingVertical: 1,
+          borderRadius: 9,
+          alignItems: "center",
+          backgroundColor: toneBackground(theme, warning),
+        }}
+      >
+        <Text style={{ color: warning, fontSize: 11, fontWeight: "600" }}>{value}</Text>
+      </View>
+    );
+  }
+
   return (
-    <SidebarRow
-      icon="Kanban"
-      label="会话看板"
-      active={currentScreen?.screenId === BOARD_SCREEN_ID}
-      trailing={
-        count === 0 ? undefined : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`${count} 个会话需要处理，点击查看`}
-            hitSlop={6}
-            onPress={function show() {
-              openPopover(AttentionPopover);
+    <>
+      <SidebarRow
+        icon="Kanban"
+        label="会话看板"
+        active={currentScreen?.screenId === BOARD_SCREEN_ID}
+        trailing={
+          count === 0 ? undefined : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${count} 个会话需要处理，点击查看`}
+              hitSlop={6}
+              onPress={function show() {
+                openPopover(AttentionPopover);
+              }}
+            >
+              {badge(count)}
+            </Pressable>
+          )
+        }
+        onPress={function open() {
+          openScreen({ screenId: BOARD_SCREEN_ID });
+        }}
+      />
+      {workspaces.map(function renderWorkspace(group) {
+        return (
+          <SidebarRow
+            key={group.key}
+            id={`workspace-${group.key}`}
+            icon="Folder"
+            label={group.label}
+            trailing={badge(group.attentionCount)}
+            onPress={function open() {
+              openScreen({
+                screenId: BOARD_SCREEN_ID,
+                params: { workspace: group.key },
+              });
             }}
-            style={{
-              minWidth: 18,
-              paddingHorizontal: 5,
-              paddingVertical: 1,
-              borderRadius: 9,
-              alignItems: "center",
-              backgroundColor: toneBackground(theme, warning),
-            }}
-          >
-            <Text style={{ color: warning, fontSize: 11, fontWeight: "600" }}>{count}</Text>
-          </Pressable>
-        )
-      }
-      onPress={function open() {
-        openScreen({ screenId: BOARD_SCREEN_ID });
-      }}
-    />
+          />
+        );
+      })}
+    </>
   );
 }
 

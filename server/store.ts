@@ -181,6 +181,7 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     .slice(-MAX_TURNS_PER_SESSION);
   const attention = oneOf(["finished", "error", "permission"] as const, record.attentionReason);
   const manual = oneOf<AnalysisStatus>(ANALYSIS_STATUSES, record.manualStatusOverride);
+  const deferredUntil = finiteNumber(record.deferredUntil);
   const labels = record.labelsKnown === true ? hydrateLabels(record.labels) : null;
   return {
     id,
@@ -204,6 +205,12 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     analysisError:
       analysisState === "running" ? "上次分析在插件重启前中断" : boundedText(record.analysisError),
     manualStatusOverride: manual,
+    deferredUntil,
+    deferToQueue: deferredUntil !== null && record.deferToQueue === true,
+    interruptedAt: finiteNumber(record.interruptedAt),
+    // Resume progress is runtime-only: nothing is mid-resume right after a load.
+    resumeState: "idle",
+    resumeError: null,
     titleState: hydrateTitleState(record.titleState),
     createdAt: finiteNumber(record.createdAt) ?? updatedAt,
     updatedAt,

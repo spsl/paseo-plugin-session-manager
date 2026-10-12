@@ -807,6 +807,22 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               void save({ seedAnalyzeLimit: value });
             }}
           />
+          <SettingsSelect<string>
+            label="重启后自动恢复会话"
+            hint="Paseo 重启后被断开的会话显示为「未连接」；恢复会重新连接 Agent，但不会发送消息。"
+            value={values?.autoResume ?? "attention"}
+            options={[
+              { label: "仅需要处理和进行中（默认）", value: "attention" },
+              { label: "全部未连接会话", value: "all" },
+              { label: "不自动恢复", value: "off" },
+            ]}
+            disabled={disabled}
+            onValueChange={function change(value) {
+              if (value === "attention" || value === "all" || value === "off") {
+                void save({ autoResume: value });
+              }
+            }}
+          />
           <NumberInput
             label="已关闭会话保留天数"
             initialValue={values?.closedRetentionDays ?? 7}

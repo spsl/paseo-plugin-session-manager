@@ -92,6 +92,11 @@ export function newRecord(
     analysis: null,
     analysisError: null,
     manualStatusOverride: null,
+    deferredUntil: null,
+    deferToQueue: false,
+    interruptedAt: null,
+    resumeState: "idle",
+    resumeError: null,
     titleState: { lastWritten: null, userOwned: false, lastWriteError: null },
     createdAt: isoToMs(agent.createdAt) ?? now,
     updatedAt: isoToMs(agent.updatedAt) ?? now,
@@ -160,11 +165,21 @@ export function applyLabels(record: SessionRecord, labels: Readonly<Record<strin
   return true;
 }
 
+export type ApplySnapshotOptions = {
+  /**
+   * First reconcile after the plugin (re)started: a persisted "live" record
+   * whose agent now reports closed went down with the daemon, so it becomes
+   * resumable ("dormant") instead of closed.
+   */
+  dormantOnClosed?: boolean;
+};
+
 /** Applies a Paseo snapshot; returns whether anything changed. */
 export function applyAgentSnapshot(
   record: SessionRecord,
   agent: SnapshotLike,
   project?: ProjectLike | null,
+  options?: ApplySnapshotOptions,
 ): boolean {
   let changed = applyHookAgent(record, agent);
   const set = <K extends keyof SessionRecord>(key: K, value: SessionRecord[K]): void => {
@@ -176,7 +191,25 @@ export function applyAgentSnapshot(
   if (agent.labels) {
     changed = applyLabels(record, agent.labels) || changed;
   }
-  set("liveness", deriveLiveness(agent));
+  const derived = deriveLiveness(agent);
+  // A dormant record stays dormant while Paseo still reports the agent closed;
+  // any real status (idle/running/error) or an archive takes precedence.
+  const liveness =
+    derived === "closed" && record.liveness === "dormant"
+      ? "dormant"
+      : derived === "closed" && options?.dormantOnClosed === true && record.liveness === "live"
+        ? "dormant"
+        : derived;
+  set("liveness", liveness);
+  if (liveness === "live") {
+    set("resumeState", "idle");
+    set("resumeError", null);
+  }
+  if (liveness === "archived" && record.deferredUntil !== null) {
+    record.deferredUntil = null;
+    record.deferToQueue = false;
+    changed = true;
+  }
   set("lifecycle", deriveLifecycle(agent));
   set("pendingPermissionCount", agent.pendingPermissions?.length ?? 0);
   set("model", agent.model ?? null);

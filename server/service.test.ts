@@ -3,7 +3,14 @@ import { DEFAULT_ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/sett
 import type { Analysis } from "../shared/types";
 import type { Analyzer } from "./analyzer/analyzer";
 import type { AnalyzerInput } from "./analyzer/prompt";
-import type { ArchivedEvent, ClosedEvent, PaseoApi, TurnEndedEvent } from "./host-types";
+import type {
+  ArchivedEvent,
+  ClosedEvent,
+  PaseoApi,
+  TurnEndedEvent,
+  TurnStartedEvent,
+} from "./host-types";
+import { newRecord } from "./lifecycle";
 import { SessionManagerService } from "./service";
 import type { SessionRecord, StateStore } from "./store";
 
@@ -79,7 +86,12 @@ function memoryStore(initial: SessionRecord[] = []): StateStore & { saved: numbe
   return store;
 }
 
-function make(settings: Partial<AnalyzerSettings> = {}, analyzer?: Analyzer, store?: StateStore) {
+function make(
+  settings: Partial<AnalyzerSettings> = {},
+  analyzer?: Analyzer,
+  store?: StateStore,
+  now?: () => number,
+) {
   let current: AnalyzerSettings = { ...DEFAULT_ANALYZER_SETTINGS, ...settings };
   const service = new SessionManagerService({
     store: store ?? memoryStore(),
@@ -87,6 +99,7 @@ function make(settings: Partial<AnalyzerSettings> = {}, analyzer?: Analyzer, sto
     settings: { current: () => current, refresh: async () => current },
     checkAnalyzer: async () => null,
     writeTitle: vi.fn(async () => undefined),
+    ...(now ? { now } : {}),
   });
   return { service, setSettings: (next: Partial<AnalyzerSettings>) => (current = { ...current, ...next }) };
 }
@@ -207,6 +220,44 @@ describe("SessionManagerService", () => {
     expect(service.getRecord("a1")?.manualStatusOverride).toBeNull();
     service.onClosed({ agent: agent() } as ClosedEvent);
     expect(service.setManualStatus("a1", "completed").ok).toBe(false);
+  });
+
+  it("defers and resumes a live session, refusing closed ones", async () => {
+    const { service } = make();
+    service.onCreated({ agent: agent() });
+    const before = Date.now();
+    expect(service.defer("a1", 3_600_000, true).ok).toBe(true);
+    const record = service.getRecord("a1") as SessionRecord;
+    expect(record.deferToQueue).toBe(true);
+    expect(record.deferredUntil).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(record.deferredUntil).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    const view = (await service.snapshot()).sessions.find((s) => s.id === "a1");
+    expect(view).toMatchObject({ column: "deferred", deferToQueue: true, needsAttention: false });
+
+    expect(service.clearDefer("a1").ok).toBe(true);
+    expect(record.deferredUntil).toBeNull();
+    expect(record.deferToQueue).toBe(false);
+
+    service.onClosed({ agent: agent() } as ClosedEvent);
+    expect(service.defer("a1", 3_600_000, false).ok).toBe(false);
+    expect(service.defer("missing", 3_600_000, false).ok).toBe(false);
+  });
+
+  it("keeps the defer across a close (restart survival) and clears it on archive", () => {
+    const { service } = make();
+    service.onCreated({ agent: agent("a1") });
+    service.defer("a1", 3_600_000, true);
+    service.onClosed({ agent: agent("a1") } as ClosedEvent);
+    expect(service.getRecord("a1")?.deferredUntil).not.toBeNull();
+    expect(service.getRecord("a1")?.deferToQueue).toBe(true);
+
+    service.onCreated({ agent: agent("a2") });
+    service.defer("a2", 3_600_000, true);
+    service.onArchived({
+      agent: agent("a2"),
+      archivedAt: new Date().toISOString(),
+    } as ArchivedEvent);
+    expect(service.getRecord("a2")).toMatchObject({ deferredUntil: null, deferToQueue: false });
   });
 
   it("drops the result when the agent is archived during a run", async () => {
@@ -374,6 +425,363 @@ describe("SessionManagerService", () => {
       expect(service.getRecord("a")).toBeUndefined();
       expect(service.getRecord("b")).toBeDefined();
       expect((await service.snapshot()).sessions.map((session) => session.id)).toEqual(["b"]);
+    });
+  });
+
+  describe("restart recovery", () => {
+    const closedEvent = (id: string) => ({ agent: agent(id) } as unknown as ClosedEvent);
+    const turnStart = (id: string) => ({ agent: agent(id) } as unknown as TurnStartedEvent);
+
+    function dormantRecord(id: string, overrides: Partial<SessionRecord> = {}): SessionRecord {
+      return {
+        ...newRecord({ id, provider: "codex", cwd: "/w" }, 1),
+        liveness: "dormant",
+        ...overrides,
+      };
+    }
+
+    function listEntry(id: string, status: string) {
+      return {
+        agent: {
+          id,
+          provider: "codex",
+          cwd: "/w",
+          status,
+          title: null,
+          labels: null,
+          parentAgentId: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        project: null,
+      };
+    }
+
+    type RefetchCall = { id: string; options: { limit?: number } };
+    type RefetchResult = { agent: unknown; entries: unknown[]; hasOlder: boolean };
+
+    function fakeDaemon(entries: unknown[], refetch: (id: string) => Promise<RefetchResult>) {
+      const calls: RefetchCall[] = [];
+      const paseo = {
+        agents: {
+          list: vi.fn(async () => ({
+            entries,
+            pageInfo: { hasMore: false, nextCursor: null },
+          })),
+          ref: (id: string) => ({
+            refresh: async () => null,
+            timeline: {
+              refetch: (options: { limit?: number }) => {
+                calls.push({ id, options });
+                return refetch(id);
+              },
+            },
+          }),
+        },
+      } as unknown as PaseoApi;
+      return { paseo, calls };
+    }
+
+    const idleResult = (id: string): RefetchResult => ({
+      agent: listEntry(id, "idle").agent,
+      entries: [],
+      hasOlder: false,
+    });
+
+    it("marks agents closed inside the shutdown window dormant, flagging interruptions", () => {
+      const { service } = make();
+      service.onCreated({ agent: agent("busy") });
+      service.onTurnStarted(turnStart("busy"));
+      service.onCreated({ agent: agent("calm") });
+      service.onClosed(closedEvent("busy"));
+      service.onClosed(closedEvent("calm"));
+      expect(service.getRecord("busy")?.liveness).toBe("closed");
+      service.prepareShutdown();
+      const busy = service.getRecord("busy");
+      expect(busy).toMatchObject({ liveness: "dormant" });
+      expect(busy?.interruptedAt).not.toBeNull();
+      expect(service.getRecord("calm")).toMatchObject({ liveness: "dormant", interruptedAt: null });
+    });
+
+    it("keeps closures outside the shutdown window closed", () => {
+      let now = 1_000_000;
+      const { service } = make({}, undefined, undefined, () => now);
+      service.onCreated({ agent: agent("a1") });
+      service.onClosed(closedEvent("a1"));
+      now += 31_000;
+      service.prepareShutdown();
+      expect(service.getRecord("a1")?.liveness).toBe("closed");
+    });
+
+    it("does not resurrect sessions that were already closed before shutdown", () => {
+      let now = 1_000_000;
+      const { service } = make({}, undefined, undefined, () => now);
+      service.onCreated({ agent: agent("a1") });
+      service.onClosed(closedEvent("a1")); // user close
+      now += 40_000;
+      service.onClosed(closedEvent("a1")); // daemon shutdown close
+      service.prepareShutdown();
+      expect(service.getRecord("a1")?.liveness).toBe("closed");
+    });
+
+    it("first reconcile after a restart turns persisted live-but-closed records dormant", async () => {
+      const persisted = dormantRecord("a1", { liveness: "live", lifecycle: "working" });
+      const { service } = make({}, undefined, memoryStore([persisted]));
+      await service.load();
+      const { paseo } = fakeDaemon([listEntry("a1", "closed")], async () => idleResult("a1"));
+      await service.reconcile(paseo);
+      const record = service.getRecord("a1");
+      expect(record?.liveness).toBe("dormant");
+      expect(record?.interruptedAt).not.toBeNull();
+    });
+
+    it("a reconcile racing the startup load waits for it instead of shadowing persisted records", async () => {
+      let release: (records: SessionRecord[]) => void = () => undefined;
+      const slowStore: StateStore = {
+        load: () =>
+          new Promise<SessionRecord[]>((resolve) => {
+            release = resolve;
+          }),
+        schedule: () => undefined,
+        flush: async () => undefined,
+      };
+      const { service } = make({}, undefined, slowStore);
+      const loaded = service.load();
+      const { paseo } = fakeDaemon([listEntry("a1", "closed")], async () => idleResult("a1"));
+      const reconciled = service.reconcile(paseo);
+      await tick();
+      release([dormantRecord("a1", { analysis: null, interruptedAt: 7 })]);
+      await Promise.all([loaded, reconciled]);
+      expect(service.getRecord("a1")).toMatchObject({ liveness: "dormant", interruptedAt: 7 });
+    });
+
+    it("later reconciles still treat a live→closed transition as a real close", async () => {
+      const persisted = dormantRecord("a1", { liveness: "live" });
+      const { service } = make({}, undefined, memoryStore([persisted]));
+      await service.load();
+      const first = fakeDaemon([listEntry("a1", "idle")], async () => idleResult("a1"));
+      await service.reconcile(first.paseo);
+      expect(service.getRecord("a1")?.liveness).toBe("live");
+      const second = fakeDaemon([listEntry("a1", "closed")], async () => idleResult("a1"));
+      await service.reconcile(second.paseo);
+      expect(service.getRecord("a1")?.liveness).toBe("closed");
+    });
+
+    it("keeps dormant records dormant across repeated restarts and closed reports", async () => {
+      const { service } = make({}, undefined, memoryStore([dormantRecord("a1")]));
+      await service.load();
+      for (let round = 0; round < 3; round += 1) {
+        const { paseo } = fakeDaemon([listEntry("a1", "closed")], async () => idleResult("a1"));
+        await service.reconcile(paseo);
+        expect(service.getRecord("a1")?.liveness).toBe("dormant");
+      }
+    });
+
+    it("a new turn clears the interruption and resume state", () => {
+      const { service } = make();
+      service.onCreated({ agent: agent("a1") });
+      service.onTurnStarted(turnStart("a1"));
+      service.onClosed(closedEvent("a1"));
+      service.prepareShutdown();
+      expect(service.getRecord("a1")?.interruptedAt).not.toBeNull();
+      service.getRecord("a1")!.resumeState = "failed";
+      service.onTurnStarted(turnStart("a1"));
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "live",
+        interruptedAt: null,
+        resumeState: "idle",
+        resumeError: null,
+      });
+    });
+
+    it("dismiss_resume closes a dormant session and clears interruption metadata", async () => {
+      const { service } = make({}, undefined, memoryStore([dormantRecord("a1", { interruptedAt: 5 })]));
+      await service.load();
+      expect(service.dismissResume("a1")).toEqual({ ok: true });
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "closed",
+        interruptedAt: null,
+        resumeState: "idle",
+      });
+      expect(service.dismissResume("a1").ok).toBe(false);
+      expect(service.dismissResume("missing").ok).toBe(false);
+    });
+
+    it("resume refuses non-dormant sessions and deduplicates in-flight calls", async () => {
+      const { service } = make({}, undefined, memoryStore([dormantRecord("a1")]));
+      await service.load();
+      expect(await service.resume("a1")).toEqual({ ok: false, reason: "尚未连接到 Paseo" });
+      const { paseo, calls } = fakeDaemon([], async () => idleResult("a1"));
+      service.touchPaseo(paseo);
+      const one = service.resume("a1");
+      const two = service.resume("a1");
+      expect(await one).toEqual({ ok: true });
+      expect(await two).toEqual({ ok: true });
+      expect(calls).toHaveLength(1);
+      expect(service.getRecord("a1")?.liveness).toBe("live");
+      expect(await service.resume("a1")).toEqual({ ok: false, reason: "会话未处于待恢复状态" });
+    });
+
+    it("a failed refetch records a Chinese reason without retrying", async () => {
+      const { service } = make({}, undefined, memoryStore([dormantRecord("a1")]));
+      await service.load();
+      const { paseo, calls } = fakeDaemon([], async () => {
+        throw new Error("连接被拒绝");
+      });
+      service.touchPaseo(paseo);
+      const result = await service.resume("a1");
+      expect(result.ok).toBe(false);
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "dormant",
+        resumeState: "failed",
+        resumeError: "恢复失败：连接被拒绝",
+      });
+      expect(calls).toHaveLength(1);
+    });
+
+    it("records a timeout reason when the refetch never resolves", async () => {
+      vi.useFakeTimers();
+      try {
+        const { service } = make({}, undefined, memoryStore([dormantRecord("a1")]));
+        await service.load();
+        const { paseo } = fakeDaemon([], () => new Promise<RefetchResult>(() => undefined));
+        service.touchPaseo(paseo);
+        const pending = service.resume("a1");
+        await vi.advanceTimersByTimeAsync(61_000);
+        const result = await pending;
+        expect(result).toEqual({ ok: false, reason: "恢复超时（60 秒）" });
+        expect(service.getRecord("a1")).toMatchObject({
+          resumeState: "failed",
+          resumeError: "恢复超时（60 秒）",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("auto-resume picks only attention columns under the default policy", async () => {
+      const attention = (status: "waiting_for_user" | "in_progress" | "unclear") =>
+        dormantRecord(`s-${status}`, {
+          analysis: { ...analysis("x"), status },
+        });
+      const store = memoryStore([
+        attention("waiting_for_user"),
+        attention("in_progress"),
+        attention("unclear"),
+      ]);
+      const { analyzer, calls: analyzerCalls } = fakeAnalyzer(true);
+      const { service } = make({ autoResume: "attention" }, analyzer, store);
+      await service.load();
+      const { paseo, calls } = fakeDaemon(
+        [listEntry("s-waiting_for_user", "closed"), listEntry("s-in_progress", "closed"), listEntry("s-unclear", "closed")],
+        async (id) => idleResult(id),
+      );
+      service.touchPaseo(paseo);
+      await service.snapshot();
+      await service.waitForResume();
+      const resumed = calls.filter((call) => call.options.limit === 1).map((call) => call.id);
+      expect(resumed.sort()).toEqual(["s-in_progress", "s-waiting_for_user"]);
+      expect(service.getRecord("s-unclear")?.liveness).toBe("dormant");
+      expect(service.getRecord("s-waiting_for_user")?.liveness).toBe("live");
+      // Resuming never schedules an analysis.
+      expect(analyzerCalls).toHaveLength(0);
+    });
+
+    it("auto-resume off leaves dormant sessions alone", async () => {
+      const { service } = make(
+        { autoResume: "off" },
+        undefined,
+        memoryStore([dormantRecord("a1")]),
+      );
+      await service.load();
+      const { paseo, calls } = fakeDaemon([listEntry("a1", "closed")], async (id) => idleResult(id));
+      service.touchPaseo(paseo);
+      await service.snapshot();
+      await service.waitForResume();
+      expect(calls).toHaveLength(0);
+      expect(service.getRecord("a1")?.liveness).toBe("dormant");
+    });
+
+    it("auto-resume all skips only sessions parked in the defer queue", async () => {
+      const future = Date.now() + 3_600_000;
+      const store = memoryStore([
+        dormantRecord("queued-defer", { deferredUntil: future, deferToQueue: true }),
+        dormantRecord("plain"),
+        dormantRecord("masked-defer", { deferredUntil: future, deferToQueue: false }),
+      ]);
+      const { service } = make({ autoResume: "all" }, undefined, store);
+      await service.load();
+      const { paseo, calls } = fakeDaemon(
+        [listEntry("queued-defer", "closed"), listEntry("plain", "closed"), listEntry("masked-defer", "closed")],
+        async (id) => idleResult(id),
+      );
+      service.touchPaseo(paseo);
+      await service.snapshot();
+      await service.waitForResume();
+      const resumed = calls.map((call) => call.id);
+      expect(resumed.sort()).toEqual(["masked-defer", "plain"]);
+      expect(service.getRecord("queued-defer")).toMatchObject({
+        liveness: "dormant",
+        deferredUntil: future,
+      });
+    });
+
+    it("auto-resume never exceeds the concurrency limit", async () => {
+      const ids = ["r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+      const store = memoryStore(ids.map((id) => dormantRecord(id)));
+      const { service } = make({ autoResume: "all" }, undefined, store);
+      await service.load();
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const resolvers: Array<() => void> = [];
+      const { paseo } = fakeDaemon(
+        ids.map((id) => listEntry(id, "closed")),
+        (id) =>
+          new Promise<RefetchResult>((resolve) => {
+            inFlight += 1;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            resolvers.push(() => {
+              inFlight -= 1;
+              resolve(idleResult(id));
+            });
+          }),
+      );
+      service.touchPaseo(paseo);
+      await service.snapshot();
+      await tick();
+      expect(inFlight).toBe(3);
+      while (resolvers.length > 0) {
+        const resolve = resolvers.shift();
+        resolve?.();
+        await tick();
+      }
+      await service.waitForResume();
+      expect(maxInFlight).toBe(3);
+      expect(ids.every((id) => service.getRecord(id)?.liveness === "live")).toBe(true);
+    });
+
+    it("auto-resume continues past failures and keeps failed sessions dormant", async () => {
+      const store = memoryStore([dormantRecord("good"), dormantRecord("bad")]);
+      const { service } = make({ autoResume: "all" }, undefined, store);
+      await service.load();
+      const { paseo } = fakeDaemon(
+        [listEntry("good", "closed"), listEntry("bad", "closed")],
+        async (id) => {
+          if (id === "bad") {
+            throw new Error("daemon 无响应");
+          }
+          return idleResult(id);
+        },
+      );
+      service.touchPaseo(paseo);
+      await service.snapshot();
+      await service.waitForResume();
+      expect(service.getRecord("good")?.liveness).toBe("live");
+      expect(service.getRecord("bad")).toMatchObject({
+        liveness: "dormant",
+        resumeState: "failed",
+        resumeError: "恢复失败：daemon 无响应",
+      });
     });
   });
 });

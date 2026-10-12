@@ -14,11 +14,12 @@ import { isDesktop, isFullscreen, setFullscreen } from "./desktop-bridge";
 import { FALLBACK_HINT, NOTICE_NO_WINDOW, openBoardInNewWindow } from "./open-board-window";
 import { useSnapshotNudges } from "./agents-watch";
 import { Chip } from "./badge";
-import { groupByColumn } from "./board-model";
+import { groupByColumn, workspaceKeyOf, workspaceLabelOf } from "./board-model";
 import { SingleColumn, WideColumns } from "./board-columns";
+import { DeferMenu } from "./defer-menu";
 import { SessionOverlay } from "./session-overlay";
 import { columnTone, errorText } from "./styles";
-import { useSnapshot } from "./use-snapshot";
+import { useSessionActions, useSnapshot } from "./use-snapshot";
 
 /**
  * A screen is given no way to open a settings screen, so index.client.tsx lends
@@ -122,6 +123,14 @@ export function BoardScreen(props: PluginScreenProps) {
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [activeColumn, setActiveColumn] = useState<BoardColumn>("waiting_for_user");
+  const [workspaceKey, setWorkspaceKey] = useState<string | null>(params.workspace ?? null);
+  const paramWorkspace = params.workspace ?? null;
+  useEffect(
+    function syncWorkspace() {
+      setWorkspaceKey(paramWorkspace);
+    },
+    [paramWorkspace],
+  );
 
   const allSessions = useMemo(
     function all(): readonly SessionView[] {
@@ -146,15 +155,49 @@ export function BoardScreen(props: PluginScreenProps) {
   );
   const sessions = useMemo(
     function filtered() {
-      return filterSessionsByProject(allSessions, filter.projectKeyBySessionId, selected);
+      const byProject = filterSessionsByProject(
+        allSessions,
+        filter.projectKeyBySessionId,
+        selected,
+      );
+      if (workspaceKey === null) {
+        return byProject;
+      }
+      return byProject.filter(function inWorkspace(session) {
+        return workspaceKeyOf(session) === workspaceKey;
+      });
     },
-    [allSessions, filter, selected],
+    [allSessions, filter, selected, workspaceKey],
+  );
+  const workspaceLabel = useMemo(
+    function label() {
+      if (workspaceKey === null) {
+        return null;
+      }
+      const hit = allSessions.find(function match(session) {
+        return workspaceKeyOf(session) === workspaceKey;
+      });
+      return hit === undefined ? workspaceKey : workspaceLabelOf(hit);
+    },
+    [allSessions, workspaceKey],
   );
   const groups = useMemo(
     function group() {
-      return groupByColumn(sessions);
+      return groupByColumn(sessions, now);
     },
-    [sessions],
+    [sessions, now],
+  );
+
+  const actions = useSessionActions();
+  const [deferTarget, setDeferTarget] = useState<SessionView | null>(null);
+  const onDefer = useCallback(function defer(session: SessionView) {
+    setDeferTarget(session);
+  }, []);
+  const onResume = useCallback(
+    function resume(session: SessionView) {
+      void actions.clearDefer(session.id);
+    },
+    [actions],
   );
 
   const onOpen = useCallback(function open(session: SessionView) {
@@ -232,6 +275,8 @@ export function BoardScreen(props: PluginScreenProps) {
           now={now}
           groups={groups}
           onOpen={onOpen}
+          onDefer={onDefer}
+          onResume={onResume}
           columnId={activeColumn}
         />
       </View>
@@ -243,6 +288,8 @@ export function BoardScreen(props: PluginScreenProps) {
         now={now}
         groups={groups}
         onOpen={onOpen}
+        onDefer={onDefer}
+        onResume={onResume}
         columnWidthPercent={columnWidthPercent}
       />
     );
@@ -325,6 +372,19 @@ export function BoardScreen(props: PluginScreenProps) {
         </View>
       ) : null}
 
+      {workspaceLabel !== null ? (
+        <View style={{ flexDirection: "row", paddingHorizontal: 12, paddingTop: 8 }}>
+          <Chip
+            theme={theme}
+            label={`${workspaceLabel} ×`}
+            selected
+            onPress={function clearWorkspace() {
+              setWorkspaceKey(null);
+            }}
+          />
+        </View>
+      ) : null}
+
       {filter.options.length > 0 ? (
         <ScrollView
           horizontal
@@ -365,6 +425,15 @@ export function BoardScreen(props: PluginScreenProps) {
         navigation={navigation}
         onClose={function close() {
           setOpenId(null);
+        }}
+      />
+
+      <DeferMenu
+        session={deferTarget}
+        theme={theme}
+        now={now}
+        onClose={function close() {
+          setDeferTarget(null);
         }}
       />
     </View>

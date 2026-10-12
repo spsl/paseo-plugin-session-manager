@@ -1,12 +1,22 @@
 /** Pure projection of a session record into the SessionView the board renders. */
 import { columnForStatus, firstLine } from "../shared/presentation";
-import type { AnalysisStatus, BoardColumn, SessionDetail, SessionView } from "../shared/types";
+import {
+  isActiveLiveness,
+  type AnalysisStatus,
+  type BoardColumn,
+  type SessionDetail,
+  type SessionView,
+} from "../shared/types";
 import type { SessionRecord } from "./store";
 
 export function effectiveStatusOf(record: SessionRecord): AnalysisStatus {
   const live = record.liveness === "live";
-  if (live && record.manualStatusOverride) {
+  if (isActiveLiveness(record.liveness) && record.manualStatusOverride) {
     return record.manualStatusOverride;
+  }
+  // A restart-interrupted dormant session always needs the user to look at it.
+  if (record.interruptedAt !== null) {
+    return "waiting_for_user";
   }
   if (live && record.pendingPermissionCount > 0) {
     return "waiting_for_user";
@@ -17,10 +27,15 @@ export function effectiveStatusOf(record: SessionRecord): AnalysisStatus {
   return record.analysis?.status ?? "unclear";
 }
 
-export function projectView(record: SessionRecord): SessionView {
-  const live = record.liveness === "live";
+export function projectView(record: SessionRecord, now: number = Date.now()): SessionView {
+  const active = isActiveLiveness(record.liveness);
+  const deferred = active && record.deferredUntil !== null && record.deferredUntil > now;
   const effectiveStatus = effectiveStatusOf(record);
-  const column: BoardColumn = live ? columnForStatus(effectiveStatus) : "closed";
+  const column: BoardColumn = !active
+    ? "closed"
+    : deferred && record.deferToQueue
+      ? "deferred"
+      : columnForStatus(effectiveStatus);
   const lastTurn = record.turns.at(-1);
   return {
     id: record.id,
@@ -43,6 +58,11 @@ export function projectView(record: SessionRecord): SessionView {
     analysis: record.analysis,
     analysisError: record.analysisError,
     manualStatusOverride: record.manualStatusOverride,
+    deferredUntil: deferred ? record.deferredUntil : null,
+    deferToQueue: deferred ? record.deferToQueue : false,
+    interruptedAt: record.interruptedAt,
+    resumeState: record.resumeState,
+    resumeError: record.resumeError,
     titleState: { ...record.titleState },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -53,13 +73,17 @@ export function projectView(record: SessionRecord): SessionView {
     modelStatus: record.analysis?.status ?? "unclear",
     effectiveStatus,
     column,
-    needsAttention: live && (column === "waiting_for_user" || record.pendingPermissionCount > 0),
+    // Dormant counts too: a restart-closed session in 需要处理 still needs the user.
+    needsAttention:
+      active &&
+      !deferred &&
+      (column === "waiting_for_user" || record.pendingPermissionCount > 0),
   };
 }
 
-export function projectDetail(record: SessionRecord): SessionDetail {
+export function projectDetail(record: SessionRecord, now: number = Date.now()): SessionDetail {
   return {
-    ...projectView(record),
+    ...projectView(record, now),
     turns: record.turns.map((turn) => ({ ...turn })),
     firstUserMessage: record.firstUserMessage,
   };
