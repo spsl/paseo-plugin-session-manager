@@ -25,6 +25,7 @@ import {
   patchClearDefer,
   patchClearManualStatus,
   patchDefer,
+  patchDeferEndSeen,
   patchDismissResume,
   patchForget,
   patchManualStatus,
@@ -93,6 +94,16 @@ async function refresh(queryClient: QueryClient, sessionId: string): Promise<voi
     queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY }),
     queryClient.invalidateQueries({ queryKey: [...DETAIL_QUERY_KEY, sessionId] }),
   ]);
+}
+
+/**
+ * Optimistically drops the "延迟已结束" marker once the card is opened; the
+ * server already acknowledged it in the detail call, this skips the poll wait.
+ */
+export function markDeferEndSeen(queryClient: QueryClient, sessionId: string): void {
+  patchCache(queryClient, function patch(snapshot) {
+    return patchDeferEndSeen(snapshot, sessionId);
+  });
 }
 
 export type SessionActions = {

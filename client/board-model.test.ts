@@ -9,6 +9,7 @@ import {
   patchClearDefer,
   patchClearManualStatus,
   patchDefer,
+  patchDeferEndSeen,
   patchDismissResume,
   patchForget,
   patchManualStatus,
@@ -280,6 +281,14 @@ describe("optimistic patches", () => {
     });
   });
 
+  it("a fresh defer drops a stale defer-end marker", () => {
+    const snap = {
+      sessions: [makeSession({ id: "a", column: "completed", deferEndedAt: 50 })],
+    };
+    const next = patchDefer(snap, "a", 123, false);
+    expect(next.sessions[0]).toMatchObject({ deferredUntil: 123, deferEndedAt: null });
+  });
+
   it("re-deferring out of the queue restores the status column", () => {
     const snap = {
       sessions: [
@@ -310,6 +319,7 @@ describe("optimistic patches", () => {
           effectiveStatus: "waiting_for_user",
           deferredUntil: 999,
           deferToQueue: true,
+          deferEndedAt: 500,
           needsAttention: false,
         }),
       ],
@@ -318,9 +328,25 @@ describe("optimistic patches", () => {
     expect(next.sessions[0]).toMatchObject({
       deferredUntil: null,
       deferToQueue: false,
+      deferEndedAt: null,
       column: "waiting_for_user",
       needsAttention: true,
     });
+  });
+
+  it("patchDeferEndSeen clears only the defer-end marker", () => {
+    const snap = {
+      sessions: [
+        makeSession({ id: "a", column: "in_progress", deferEndedAt: 500 }),
+        makeSession({ id: "b", deferEndedAt: null }),
+      ],
+    };
+    const next = patchDeferEndSeen(snap, "a");
+    expect(next.sessions[0].deferEndedAt).toBeNull();
+    expect(next.sessions[0].column).toBe("in_progress");
+    expect(patchDeferEndSeen({ sessions: [next.sessions[1]] }, "b").sessions[0]).toEqual(
+      next.sessions[1],
+    );
   });
 
   it("automaticStatus prioritizes the restart interruption flag", () => {

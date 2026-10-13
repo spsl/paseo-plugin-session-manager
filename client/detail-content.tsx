@@ -146,7 +146,6 @@ export function useDetailActions(props: {
   async function archive(): Promise<void> {
     if (!confirmArchive) {
       setConfirmArchive(true);
-      toast.show("再次点击归档图标确认", { variant: "warning" });
       return;
     }
     setBusy(true);
@@ -237,6 +236,9 @@ export function DetailContent(props: {
             label={active ? analysisStatusLabel(session.effectiveStatus) : "已关闭"}
             tone={active ? statusTone(theme, session.effectiveStatus) : columnTone(theme, "closed")}
           />
+          {session.deferEndedAt !== null ? (
+            <Badge theme={theme} label="延迟已结束" tone={colors.accent} />
+          ) : null}
           {dormant ? (
             <Badge
               theme={theme}

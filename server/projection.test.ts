@@ -79,7 +79,7 @@ describe("projectView", () => {
     expect(view).toMatchObject({ column: "waiting_for_user", deferToQueue: false, needsAttention: false });
   });
 
-  it("treats an expired defer as not deferred", () => {
+  it("treats an expired defer as not deferred and marks the defer end", () => {
     const now = 1_000;
     const view = projectView(
       record({ deferredUntil: now - 1, deferToQueue: true, pendingPermissionCount: 1 }),
@@ -89,8 +89,16 @@ describe("projectView", () => {
       column: "waiting_for_user",
       deferredUntil: null,
       deferToQueue: false,
+      deferEndedAt: now - 1,
       needsAttention: true,
     });
+  });
+
+  it("reports no defer-end marker for active or absent defers", () => {
+    const now = 1_000;
+    const deferred = projectView(record({ deferredUntil: now + 60_000 }), now);
+    expect(deferred.deferEndedAt).toBeNull();
+    expect(projectView(record(), now).deferEndedAt).toBeNull();
   });
 
   it("clears the defer in the view for non-live sessions", () => {
@@ -99,7 +107,12 @@ describe("projectView", () => {
       record({ liveness: "closed", deferredUntil: now + 60_000, deferToQueue: true }),
       now,
     );
-    expect(view).toMatchObject({ column: "closed", deferredUntil: null, deferToQueue: false });
+    expect(view).toMatchObject({
+      column: "closed",
+      deferredUntil: null,
+      deferToQueue: false,
+      deferEndedAt: null,
+    });
   });
 
   it("projects a restart-interrupted dormant session into the needs-action column", () => {

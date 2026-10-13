@@ -25,6 +25,7 @@ export function makeSession(overrides: Partial<SessionView> = {}): SessionView {
     manualStatusOverride: null,
     deferredUntil: null,
     deferToQueue: false,
+    deferEndedAt: null,
     interruptedAt: null,
     resumeState: "idle",
     resumeError: null,

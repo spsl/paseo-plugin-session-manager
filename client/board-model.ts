@@ -254,6 +254,7 @@ export function patchDefer<T extends WithSessions>(
       ...session,
       deferredUntil: until,
       deferToQueue: toQueue,
+      deferEndedAt: null,
       column,
       needsAttention: false,
     };
@@ -272,11 +273,22 @@ export function patchClearDefer<T extends WithSessions>(snapshot: T, sessionId: 
       ...session,
       deferredUntil: null,
       deferToQueue: false,
+      deferEndedAt: null,
       column,
       needsAttention:
         isActiveLiveness(session.liveness) &&
         (column === "waiting_for_user" || session.pendingPermissionCount > 0),
     };
+  });
+}
+
+/** Optimistic: the "延迟已结束" marker clears once the card is opened. */
+export function patchDeferEndSeen<T extends WithSessions>(snapshot: T, sessionId: string): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    if (session.deferEndedAt === null) {
+      return session;
+    }
+    return { ...session, deferEndedAt: null };
   });
 }
 
@@ -304,6 +316,7 @@ export function patchDismissResume<T extends WithSessions>(snapshot: T, sessionI
       resumeError: null,
       deferredUntil: null,
       deferToQueue: false,
+      deferEndedAt: null,
       column: "closed",
       needsAttention: false,
     };

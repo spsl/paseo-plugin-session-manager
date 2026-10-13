@@ -60,6 +60,10 @@ export function projectView(record: SessionRecord, now: number = Date.now()): Se
     manualStatusOverride: record.manualStatusOverride,
     deferredUntil: deferred ? record.deferredUntil : null,
     deferToQueue: deferred ? record.deferToQueue : false,
+    // An expired-but-uncleared defer marks a card that just returned to normal
+    // display; viewing the card clears it (see SessionManagerService.detail).
+    deferEndedAt:
+      record.deferredUntil !== null && record.deferredUntil <= now ? record.deferredUntil : null,
     interruptedAt: record.interruptedAt,
     resumeState: record.resumeState,
     resumeError: record.resumeError,

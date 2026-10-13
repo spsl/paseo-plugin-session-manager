@@ -1180,7 +1180,24 @@ export class SessionManagerService {
 
   detail(id: string): SessionDetail | null {
     const record = this.records.get(id);
-    return record ? projectDetail(record, this.now()) : null;
+    if (!record) {
+      return null;
+    }
+    // Projected before the acknowledge so the opened card still reports the
+    // ended defer once; the board marker clears on the next snapshot.
+    const detail = projectDetail(record, this.now());
+    this.acknowledgeDeferEnd(record);
+    return detail;
+  }
+
+  /** Opening a card acknowledges an expired defer; an active defer is untouched. */
+  private acknowledgeDeferEnd(record: SessionRecord): void {
+    if (record.deferredUntil === null || record.deferredUntil > this.now()) {
+      return;
+    }
+    record.deferredUntil = null;
+    record.deferToQueue = false;
+    this.persist();
   }
 
   // ---- snapshot / reconcile / seed -------------------------------------

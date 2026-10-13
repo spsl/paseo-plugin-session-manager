@@ -6,7 +6,8 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { analysisStatusLabel, resumeStateLabel, sessionTitle } from "../shared/presentation";
 import { isActiveLiveness, type SessionDetail } from "../shared/types";
@@ -15,7 +16,7 @@ import { ConversationPane } from "./conversation/conversation-pane";
 import { DeferMenu } from "./defer-menu";
 import { DetailContent, useDetailActions } from "./detail-content";
 import { columnTone, errorText, statusTone } from "./styles";
-import { useDetail } from "./use-snapshot";
+import { markDeferEndSeen, useDetail } from "./use-snapshot";
 
 type Props = {
   sessionId: string | null;
@@ -32,6 +33,18 @@ export function SessionOverlay(props: Props) {
   const { colors } = theme;
   const detail = useDetail(sessionId);
   const [deferOpen, setDeferOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const deferEndedAt = detail.data?.session?.deferEndedAt ?? null;
+  // Opening the card marks an ended defer as seen; the server already cleared
+  // it in this detail call, the patch only skips the wait for the next poll.
+  useEffect(
+    function markSeen() {
+      if (sessionId !== null && deferEndedAt !== null) {
+        markDeferEndSeen(queryClient, sessionId);
+      }
+    },
+    [queryClient, sessionId, deferEndedAt],
+  );
   if (sessionId === null) {
     return null;
   }

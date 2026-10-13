@@ -32,6 +32,7 @@ export type SessionRecord = Omit<
   | "effectiveStatus"
   | "column"
   | "needsAttention"
+  | "deferEndedAt"
 > & {
   turns: Turn[];
   firstUserMessage: string | null;

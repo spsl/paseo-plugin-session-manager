@@ -148,6 +148,8 @@ export const SessionViewSchema = z.object({
   deferredUntil: z.number().nullable(),
   /** A deferred session either sits masked in its column or parks in the deferred queue. */
   deferToQueue: z.boolean(),
+  /** The defer ended at this time and the card hasn't been opened since; null otherwise. */
+  deferEndedAt: z.number().nullable(),
   /** Set when a Paseo restart closed the session mid-task (working or awaiting permission). */
   interruptedAt: z.number().nullable(),
   /** Runtime resume progress for dormant sessions; always idle after a reload. */

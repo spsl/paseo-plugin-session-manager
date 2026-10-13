@@ -260,6 +260,34 @@ describe("SessionManagerService", () => {
     expect(service.getRecord("a2")).toMatchObject({ deferredUntil: null, deferToQueue: false });
   });
 
+  it("marks an expired defer on the view and clears it once the card is opened", async () => {
+    const { service } = make();
+    service.onCreated({ agent: agent() });
+    service.defer("a1", 60_000, true);
+    const record = service.getRecord("a1") as SessionRecord;
+    record.deferredUntil = Date.now() - 1;
+
+    const before = (await service.snapshot()).sessions.find((s) => s.id === "a1");
+    expect(before).toMatchObject({ deferEndedAt: record.deferredUntil, column: "unclear" });
+
+    const detail = service.detail("a1");
+    expect(detail?.deferEndedAt).not.toBeNull();
+    expect(record.deferredUntil).toBeNull();
+    expect(record.deferToQueue).toBe(false);
+
+    const after = service.detail("a1");
+    expect(after?.deferEndedAt).toBeNull();
+  });
+
+  it("keeps an active defer when the card is opened", () => {
+    const { service } = make();
+    service.onCreated({ agent: agent() });
+    service.defer("a1", 3_600_000, true);
+    const detail = service.detail("a1");
+    expect(detail?.deferEndedAt).toBeNull();
+    expect(service.getRecord("a1")?.deferredUntil).not.toBeNull();
+  });
+
   it("drops the result when the agent is archived during a run", async () => {
     const { analyzer, calls } = fakeAnalyzer();
     const { service } = make({}, analyzer);

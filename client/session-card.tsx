@@ -96,6 +96,9 @@ function SessionCardView(props: Props) {
         </Text>
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+        {session.deferEndedAt !== null ? (
+          <Badge theme={theme} label="延迟已结束" tone={colors.accent} />
+        ) : null}
         {resume !== null ? (
           <Badge
             theme={theme}
