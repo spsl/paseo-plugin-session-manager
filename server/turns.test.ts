@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentTimelineItem } from "./host-types";
 import {
+  declaredFrom,
   firstUserMessageFrom,
   joinText,
   stableTextHash,
@@ -113,5 +114,69 @@ describe("turnsFromTimelineEntries", () => {
     const turns = turnsFromTimelineEntries(entries);
     expect(turns).toHaveLength(5);
     expect(turns[0].userInput).toBe("u3");
+  });
+});
+
+describe("declared results", () => {
+  const tool = { type: "tool_call", name: "Bash" } as unknown as AgentTimelineItem;
+  const reply = (text: string, messageId?: string) =>
+    ({ type: "assistant_message", text, messageId }) as AgentTimelineItem;
+
+  it("parses the first non-empty line, tolerating bold and half-width colons", () => {
+    expect(declaredFrom("\n完成：方案已写好\n/abs/design-a.md")).toEqual({ kind: "done", text: "方案已写好" });
+    expect(declaredFrom("**阻塞：** 缺少权限")).toEqual({ kind: "blocked", text: "缺少权限" });
+    expect(declaredFrom("**失败**: 测试跑不起来")).toEqual({ kind: "failed", text: "测试跑不起来" });
+    expect(declaredFrom("已完成：方案")).toBeNull();
+    expect(declaredFrom("这里说明一下\n完成：x")).toBeNull();
+  });
+
+  it("reads only the final reply of a turn", () => {
+    const turn = turnFromTurnEnded(
+      [user("做方案"), assistant("完成：先说一句"), tool, assistant("我继续"), assistant("看看")],
+      completed,
+      "t",
+      1,
+    );
+    expect(turn?.declared).toBeNull();
+    const done = turnFromTurnEnded(
+      [user("做方案"), assistant("先看代码"), tool, assistant("完成："), assistant("已写好\n/x.md")],
+      completed,
+      "t",
+      1,
+    );
+    expect(done?.declared).toEqual({ kind: "done", text: "已写好" });
+  });
+
+  it("splits adjacent replies with different message ids", () => {
+    const turn = turnFromTurnEnded(
+      [user("x"), reply("完成：旧的", "m1"), reply("补充说明", "m2")],
+      completed,
+      "t",
+      1,
+    );
+    expect(turn?.declared).toBeNull();
+  });
+
+  it("ignores declarations on failed turns", () => {
+    const turn = turnFromTurnEnded(
+      [user("x"), assistant("完成：好了")],
+      { kind: "failed", error: { message: "boom" } },
+      "t",
+      1,
+    );
+    expect(turn?.declared).toBeNull();
+  });
+
+  it("parses declarations in backfilled turns", () => {
+    const entries: BackfillEntry[] = [
+      { item: user("做"), timestamp: "2026-01-01T00:00:00Z", seqStart: 1 },
+      { item: assistant("看看"), timestamp: "2026-01-01T00:00:01Z", seqStart: 2 },
+      { item: tool, timestamp: "2026-01-01T00:00:02Z", seqStart: 3 },
+      { item: assistant("阻塞：需要确认接口"), timestamp: "2026-01-01T00:00:03Z", seqStart: 4 },
+    ];
+    expect(turnsFromTimelineEntries(entries)[0].declared).toEqual({
+      kind: "blocked",
+      text: "需要确认接口",
+    });
   });
 });

@@ -25,6 +25,7 @@ const turn = (id: string, text = "out") => ({
   outcome: "completed" as const,
   completedAt: 5,
   contextIncomplete: false,
+  declared: null,
 });
 
 describe("JsonStateStore", () => {
@@ -113,6 +114,25 @@ describe("JsonStateStore", () => {
       resumeState: "idle",
       resumeError: null,
     });
+  });
+
+  it("round-trips declared results and the team notification marker", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    store.schedule(() => [
+      make("a", {
+        interruptedAt: 9,
+        interruptNotifiedAt: 9,
+        turns: [
+          { ...turn("t1"), declared: { kind: "blocked", text: "缺权限" } },
+          { ...turn("t2"), declared: { kind: "nope", text: "x" } as never },
+        ],
+      }),
+    ]);
+    await store.flush();
+    const [loaded] = await new JsonStateStore(path).load();
+    expect(loaded.interruptNotifiedAt).toBe(9);
+    expect(loaded.turns.map((t) => t.declared)).toEqual([{ kind: "blocked", text: "缺权限" }, null]);
   });
 
   it("writes the file with mode 0600", async () => {

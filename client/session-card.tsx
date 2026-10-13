@@ -13,10 +13,10 @@ import {
   sessionTitle,
   workspaceLabel,
 } from "../shared/presentation";
-import { isActiveLiveness, type SessionView } from "../shared/types";
+import { DECLARED_KIND_LABELS, isActiveLiveness, type SessionView } from "../shared/types";
 import { Badge } from "./badge";
 import { countSubagents, EMPTY_SUBAGENTS, isDeferred, subagentStatusOf } from "./board-model";
-import { columnTone, toneBackground, withAlpha } from "./styles";
+import { columnTone, declaredTone, toneBackground, withAlpha } from "./styles";
 
 type Props = {
   session: SessionView;
@@ -45,8 +45,12 @@ function SessionCardView(props: Props) {
   const summary = firstLine(session.analysis?.summary, 160);
   const working = session.liveness === "live" && session.lifecycle === "working";
   const running = session.analysisState === "running" || session.analysisState === "queued";
+  const declared = session.declared;
+  // A declared result already says whether the user is needed.
   const attention =
-    session.analysis?.needsUserAttention === true && isActiveLiveness(session.liveness);
+    declared === null &&
+    session.analysis?.needsUserAttention === true &&
+    isActiveLiveness(session.liveness);
   const deferred = isDeferred(session, now);
   const resume = resumeStateLabel(session);
   const resuming = session.resumeState === "queued" || session.resumeState === "resuming";
@@ -92,6 +96,19 @@ function SessionCardView(props: Props) {
       <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>
         {`工作区：${workspaceLabel(session)}${branch ? `  ·  分支：${branch}` : ""}`}
       </Text>
+      {declared ? (
+        <Text
+          numberOfLines={2}
+          style={{
+            color: declaredTone(theme, declared.kind),
+            fontSize: 12,
+            fontWeight: "600",
+            lineHeight: 17,
+          }}
+        >
+          {`${DECLARED_KIND_LABELS[declared.kind]}：${declared.text}`}
+        </Text>
+      ) : null}
       <Text
         numberOfLines={2}
         style={{

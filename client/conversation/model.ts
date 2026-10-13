@@ -289,6 +289,15 @@ export function splitFences(text: string): TextSegment[] {
 
 export const TOOL_TEXT_LIMIT = 4000;
 
+/** Prefix of a steer message: tells the agent it is a supplement, not a new task. */
+export const STEER_PREFIX =
+  "[追加说明] 这是对当前任务的补充，不是替换：继续完成原目标，在本轮最终回复中一并体现，不要单独确认。";
+
+/** The text sent for a steer (wording borrowed from Multica's additional guidance). */
+export function steerText(text: string): string {
+  return `${STEER_PREFIX}\n${text}`;
+}
+
 export function truncateText(value: string, limit: number = TOOL_TEXT_LIMIT): string {
   return value.length > limit ? `${value.slice(0, limit)}\n… 已截断（共 ${value.length} 字符）` : value;
 }

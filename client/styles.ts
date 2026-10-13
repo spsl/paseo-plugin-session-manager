@@ -1,6 +1,6 @@
 /** Theme-derived tones and small style helpers shared by the board UI. */
 import type { PluginTheme } from "@getpaseo/plugin";
-import type { AnalysisStatus, BoardColumn } from "../shared/types";
+import type { AnalysisStatus, BoardColumn, DeclaredKind } from "../shared/types";
 
 export function withAlpha(color: string, alpha: string, fallback: string): string {
   return /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}${alpha}` : fallback;
@@ -34,6 +34,14 @@ export function statusTone(theme: PluginTheme, status: AnalysisStatus): string {
     case "unclear":
       return theme.colors.foregroundMuted;
   }
+}
+
+/** Color of an agent's own 「完成 / 阻塞 / 失败」 line. */
+export function declaredTone(theme: PluginTheme, kind: DeclaredKind): string {
+  if (kind === "done") {
+    return theme.colors.statusSuccess;
+  }
+  return kind === "failed" ? theme.colors.statusDanger : theme.colors.statusWarning;
 }
 
 export function toneBackground(theme: PluginTheme, tone: string): string {

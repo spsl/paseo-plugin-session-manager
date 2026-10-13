@@ -97,6 +97,33 @@ export function speechOf(analysis: Pick<Analysis, "speech" | "summary">): string
 export const TURN_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
+export const DECLARED_KINDS = ["done", "blocked", "failed"] as const;
+export type DeclaredKind = (typeof DECLARED_KINDS)[number];
+
+/** Max characters kept from a declared result line. */
+export const DECLARED_TEXT_MAX_LENGTH = 200;
+
+/**
+ * The status an agent declared itself on the first line of its final reply
+ * (「完成：…」「阻塞：…」「失败：…」, the /dev-team reply convention).
+ */
+export const DeclaredSchema = z.object({
+  kind: z.enum(DECLARED_KINDS),
+  text: z.string(),
+});
+export type Declared = z.infer<typeof DeclaredSchema>;
+
+/** Done is completed; blocked and failed both need the user (需要处理). */
+export function statusForDeclared(kind: DeclaredKind): AnalysisStatus {
+  return kind === "done" ? "completed" : "blocked";
+}
+
+export const DECLARED_KIND_LABELS: Record<DeclaredKind, string> = {
+  done: "完成",
+  blocked: "阻塞",
+  failed: "失败",
+};
+
 export const TurnSchema = z.object({
   id: z.string(),
   /** Stable content key; a turn with the same id OR dedupeKey updates in place. */
@@ -106,6 +133,8 @@ export const TurnSchema = z.object({
   outcome: z.enum(TURN_OUTCOMES),
   completedAt: z.number(),
   contextIncomplete: z.boolean(),
+  /** Absent on turns recorded before declarations were parsed. */
+  declared: DeclaredSchema.nullable().optional(),
 });
 export type Turn = z.infer<typeof TurnSchema>;
 
@@ -162,6 +191,8 @@ export const SessionViewSchema = z.object({
   archivedAt: z.number().nullable(),
   turnCount: z.number(),
   lastUserInput: z.string().nullable(),
+  /** The latest turn's self-declared result line, if any. */
+  declared: DeclaredSchema.nullable(),
   /** Latest model verdict, without lifecycle or user override applied. */
   modelStatus: AnalysisStatusSchema,
   /** The status the live board presents before the closed column is applied. */

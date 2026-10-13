@@ -36,6 +36,7 @@ export function makeSession(overrides: Partial<SessionView> = {}): SessionView {
     archivedAt: null,
     turnCount: 1,
     lastUserInput: "实现会话看板",
+    declared: null,
     modelStatus: "unclear",
     effectiveStatus: "unclear",
     column: "unclear",

@@ -124,3 +124,10 @@ describe("sessionDisplayName", () => {
     expect(sessionDisplayName({ agentTitle: null, cwd: "/" })).toBe("会话");
   });
 });
+
+describe("declared results on turn cards", () => {
+  it("takes status from the agent's declaration", () => {
+    expect(readyTurnCard(analysis, { kind: "blocked", text: "x" }).label).toBe("阻塞");
+    expect(readyTurnCard({ ...analysis, status: "blocked" }, { kind: "done", text: "x" }).label).toBe("已完成");
+  });
+});

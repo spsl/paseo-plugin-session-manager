@@ -8,7 +8,13 @@
  */
 import { z } from "zod";
 import { analysisStatusLabel } from "./presentation";
-import { speechOf, type Analysis, type AnalysisStatus } from "./types";
+import {
+  speechOf,
+  statusForDeclared,
+  type Analysis,
+  type AnalysisStatus,
+  type Declared,
+} from "./types";
 
 export const SESSION_CARD_KIND = "session-manager-card";
 export const SESSION_CARD_VERSION = 1;
@@ -88,14 +94,16 @@ export function pendingTurnCard(): SessionCard {
   };
 }
 
-export function readyTurnCard(analysis: Analysis): SessionCard {
+/** The agent's own declared result, when present, sets the card's status. */
+export function readyTurnCard(analysis: Analysis, declared: Declared | null = null): SessionCard {
   const text = speechOf(analysis);
   const next = analysis.nextSteps.length > 0 ? oneLine(analysis.nextSteps[0]) : "";
+  const status = declared ? statusForDeclared(declared.kind) : analysis.status;
   return {
     variant: "turn",
     state: "ready",
-    tone: statusTone(analysis.status),
-    label: analysisStatusLabel(analysis.status),
+    tone: statusTone(status),
+    label: analysisStatusLabel(status),
     text,
     nextStep: next === "" ? null : next,
     detail: null,

@@ -7,6 +7,7 @@ import type { AnalyzerSettings } from "../shared/settings";
 import {
   isActiveLiveness,
   type Analysis,
+  type Declared,
   type AnalysisStatus,
   type SessionDetail,
   type SessionView,
@@ -38,6 +39,7 @@ import {
   type StateStore,
 } from "./store";
 import { decideTitleWrite, writeTitleViaCli } from "./title-writeback";
+import { interruptedTeamGroups, teamRecoveryMessage, type TeamRecoveryGroup } from "./team-recovery";
 import { firstUserMessageFrom, turnFromTurnEnded, turnsFromTimelineEntries } from "./turns";
 import { normalizeTitle } from "../shared/types";
 import { sessionDisplayName } from "../shared/card";
@@ -57,6 +59,7 @@ const SHUTDOWN_CLOSE_WINDOW_MS = 30_000;
 const RESUME_CONCURRENCY = 3;
 const RESUME_TIMEOUT_MS = 60_000;
 const RESUME_TIMEOUT_TEXT = "恢复超时（60 秒）";
+const TEAM_NOTIFY_TIMEOUT_MS = 30_000;
 /** Another plugin's helper agents are never carded or announced, whatever the board setting says. */
 const NEVER_NOTIFY = parseExclusions("herald.role");
 
@@ -339,7 +342,10 @@ export class SessionManagerService {
   private finishTurnCard(
     id: string,
     turnId: string,
-    outcome: "superseded" | "failed" | { analysis: Analysis; turnOutcome: Turn["outcome"] },
+    outcome:
+      | "superseded"
+      | "failed"
+      | { analysis: Analysis; turnOutcome: Turn["outcome"]; declared: Declared | null },
     error?: string,
   ): void {
     const notifier = this.deps.notifier;
@@ -361,7 +367,14 @@ export class SessionManagerService {
       if (outcome === "failed") {
         return notifier.turnFailed(paseo, agent, turnId, error ?? "分析失败");
       }
-      return notifier.turnReady(paseo, agent, turnId, outcome.analysis, outcome.turnOutcome);
+      return notifier.turnReady(
+        paseo,
+        agent,
+        turnId,
+        outcome.analysis,
+        outcome.turnOutcome,
+        outcome.declared,
+      );
     });
   }
 
@@ -765,9 +778,11 @@ export class SessionManagerService {
       current.analysisError = null;
       current.analyzedTurnId = targetTurnId;
       this.persist();
+      const turn = current.turns.at(-1);
       this.finishTurnCard(id, targetTurnId, {
         analysis: result,
-        turnOutcome: current.turns.at(-1)?.outcome ?? "completed",
+        turnOutcome: turn?.outcome ?? "completed",
+        declared: turn?.declared ?? null,
       });
       void this.maybeWriteBackTitle(id, result.title);
     } else {
@@ -1072,7 +1087,8 @@ export class SessionManagerService {
       return;
     }
     this.autoResumeStarted = true;
-    this.autoResumeDone = this.runAutoResume();
+    // Team recovery runs after auto resume, so it never races it for the same agent.
+    this.autoResumeDone = this.runAutoResume().then(() => this.notifyInterruptedTeams());
   }
 
   /** Resolves when the startup auto-resume pass finishes (tests). */
@@ -1141,6 +1157,64 @@ export class SessionManagerService {
     }
     await Promise.all(workers);
     console.log(`[session-manager] resume: ${candidates.length} queued, ${ok} ok, ${failed} failed`);
+  }
+
+  /**
+   * Tells each /dev-team coordinator which of its team sub-agents a restart
+   * interrupted (see team-recovery.ts). Best-effort: a failure is logged and
+   * left unmarked, so the next plugin start tries again.
+   */
+  private async notifyInterruptedTeams(): Promise<void> {
+    if (this.deps.settings.current().teamRecovery === "off") {
+      return;
+    }
+    for (const group of interruptedTeamGroups(this.records.values())) {
+      const paseo = this.paseo;
+      if (this.stopped || !paseo) {
+        return;
+      }
+      await this.notifyCoordinator(paseo, group);
+    }
+  }
+
+  private async notifyCoordinator(paseo: PaseoApi, group: TeamRecoveryGroup): Promise<void> {
+    const id = group.coordinatorId;
+    const coordinator = this.records.get(id);
+    if (!coordinator || !isActiveLiveness(coordinator.liveness)) {
+      // Closed or archived by the user (or unknown): leave the flow alone.
+      return;
+    }
+    if (coordinator.liveness === "live" && coordinator.lifecycle === "working") {
+      // Already running, likely told to continue; a send would interrupt it.
+      return;
+    }
+    if (coordinator.liveness === "dormant") {
+      const resumed = await this.resume(id);
+      if (!resumed.ok) {
+        console.warn(`[session-manager] team recovery: resume ${id} failed: ${resumed.reason ?? ""}`);
+        return;
+      }
+    }
+    try {
+      await withTimeout(
+        paseo.agents.ref(id).send(teamRecoveryMessage(group)),
+        TEAM_NOTIFY_TIMEOUT_MS,
+        "通知协调者超时",
+      );
+    } catch (error) {
+      console.warn(`[session-manager] team recovery: notify ${id} failed`, error);
+      return;
+    }
+    for (const member of group.members) {
+      const record = this.records.get(member.id);
+      if (record && record.interruptedAt === member.interruptedAt) {
+        record.interruptNotifiedAt = member.interruptedAt;
+      }
+    }
+    this.persist();
+    console.log(
+      `[session-manager] team recovery: notified ${id} about ${group.members.length} interrupted sub-agent(s)`,
+    );
   }
 
   async testAnalyzer(): Promise<{ ok: boolean; durationMs: number; title?: string; error?: string }> {

@@ -6,6 +6,7 @@ import {
   mergeStreamEvent,
   prependOlder,
   splitFences,
+  steerText,
   stateFromFetch,
   toolBody,
   toolSummary,
@@ -193,5 +194,13 @@ describe("permissions", () => {
 
   it("hides answered requests", () => {
     expect(visiblePermissions([{ id: "a" }, { id: "b" }], new Set(["a"]))).toEqual([{ id: "b" }]);
+  });
+});
+
+describe("steerText", () => {
+  it("marks the message as a supplement to the running task", () => {
+    expect(steerText("顺便把测试也跑一下")).toBe(
+      "[追加说明] 这是对当前任务的补充，不是替换：继续完成原目标，在本轮最终回复中一并体现，不要单独确认。\n顺便把测试也跑一下",
+    );
   });
 });

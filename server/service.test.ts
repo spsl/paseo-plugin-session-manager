@@ -490,6 +490,7 @@ describe("SessionManagerService", () => {
 
     function fakeDaemon(entries: unknown[], refetch: (id: string) => Promise<RefetchResult>) {
       const calls: RefetchCall[] = [];
+      const sends: Array<{ id: string; text: string }> = [];
       const paseo = {
         agents: {
           list: vi.fn(async () => ({
@@ -498,6 +499,9 @@ describe("SessionManagerService", () => {
           })),
           ref: (id: string) => ({
             refresh: async () => null,
+            send: async (text: string) => {
+              sends.push({ id, text });
+            },
             timeline: {
               refetch: (options: { limit?: number }) => {
                 calls.push({ id, options });
@@ -507,7 +511,7 @@ describe("SessionManagerService", () => {
           }),
         },
       } as unknown as PaseoApi;
-      return { paseo, calls };
+      return { paseo, calls, sends };
     }
 
     const idleResult = (id: string): RefetchResult => ({
@@ -713,6 +717,79 @@ describe("SessionManagerService", () => {
       expect(service.getRecord("s-waiting_for_user")?.liveness).toBe("live");
       // Resuming never schedules an analysis.
       expect(analyzerCalls).toHaveLength(0);
+    });
+
+    describe("team recovery", () => {
+      const team = { team: "T1", role: "implementer" };
+      const member = (overrides: Partial<SessionRecord> = {}) =>
+        dormantRecord("m1", {
+          parentAgentId: "coord",
+          interruptedAt: 5,
+          labels: team,
+          labelsKnown: true,
+          ...overrides,
+        });
+      const memberEntry = (status = "closed") => {
+        const entry = listEntry("m1", status);
+        return { ...entry, agent: { ...entry.agent, parentAgentId: "coord", labels: team } };
+      };
+      // Real snapshots carry the parent and labels; the generic idle result does not.
+      const refetchIdle = async (id: string): Promise<RefetchResult> =>
+        id === "m1" ? { ...idleResult(id), agent: memberEntry("idle").agent } : idleResult(id);
+
+      it("resumes a dormant coordinator and tells it once which sub-agents were interrupted", async () => {
+        const { service } = make({}, undefined, memoryStore([dormantRecord("coord"), member()]));
+        await service.load();
+        const { paseo, calls, sends } = fakeDaemon(
+          [listEntry("coord", "closed"), memberEntry()],
+          refetchIdle,
+        );
+        service.touchPaseo(paseo);
+        await service.snapshot();
+        await service.waitForResume();
+        expect(calls.map((call) => call.id)).toContain("coord");
+        expect(sends).toHaveLength(1);
+        expect(sends[0].id).toBe("coord");
+        expect(sends[0].text.split("\n")[0]).toBe("/dev-team 继续 T1");
+        expect(sends[0].text).toContain("implementer（agentId m1）");
+        expect(service.getRecord("m1")?.interruptNotifiedAt).toBe(5);
+
+        // A plugin reload with the same restart does not report it again.
+        const again = make(
+          {},
+          undefined,
+          memoryStore([{ ...service.getRecord("coord")! }, { ...service.getRecord("m1")! }]),
+        ).service;
+        await again.load();
+        const second = fakeDaemon([listEntry("coord", "idle"), memberEntry("idle")], refetchIdle);
+        again.touchPaseo(second.paseo);
+        await again.snapshot();
+        await again.waitForResume();
+        expect(second.sends).toHaveLength(0);
+      });
+
+      it("leaves the flow alone when disabled or the coordinator was closed", async () => {
+        const off = make({ teamRecovery: "off" }, undefined, memoryStore([dormantRecord("coord"), member()]));
+        await off.service.load();
+        const offDaemon = fakeDaemon([listEntry("coord", "closed"), memberEntry()], refetchIdle);
+        off.service.touchPaseo(offDaemon.paseo);
+        await off.service.snapshot();
+        await off.service.waitForResume();
+        expect(offDaemon.sends).toHaveLength(0);
+
+        const closed = make(
+          {},
+          undefined,
+          memoryStore([dormantRecord("coord", { liveness: "closed" }), member()]),
+        );
+        await closed.service.load();
+        const closedDaemon = fakeDaemon([listEntry("coord", "closed"), memberEntry()], refetchIdle);
+        closed.service.touchPaseo(closedDaemon.paseo);
+        await closed.service.snapshot();
+        await closed.service.waitForResume();
+        expect(closedDaemon.sends).toHaveLength(0);
+        expect(closed.service.getRecord("m1")?.interruptNotifiedAt).toBeNull();
+      });
     });
 
     it("auto-resume off leaves dormant sessions alone", async () => {

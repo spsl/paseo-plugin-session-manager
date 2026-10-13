@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import {
   ANALYSIS_STATES,
   ANALYSIS_STATUSES,
+  DECLARED_KINDS,
+  DECLARED_TEXT_MAX_LENGTH,
   LIFECYCLES,
   LIVENESSES,
   TURN_OUTCOMES,
@@ -10,6 +12,7 @@ import {
   type Analysis,
   type AnalysisState,
   type AnalysisStatus,
+  type Declared,
   type Lifecycle,
   type Liveness,
   type SessionView,
@@ -33,7 +36,13 @@ export type SessionRecord = Omit<
   | "column"
   | "needsAttention"
   | "deferEndedAt"
+  | "declared"
 > & {
+  /**
+   * The `interruptedAt` already reported to the team coordinator, so the
+   * same restart is never reported twice (see notifyInterruptedTeams).
+   */
+  interruptNotifiedAt: number | null;
   turns: Turn[];
   firstUserMessage: string | null;
   firstUserMessageKnown: boolean;
@@ -69,6 +78,18 @@ function oneOf<T extends string>(values: readonly T[], value: unknown): T | null
     : null;
 }
 
+function hydrateDeclared(value: unknown): Declared | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const kind = oneOf(DECLARED_KINDS, record.kind);
+  if (!kind || typeof record.text !== "string") {
+    return null;
+  }
+  return { kind, text: record.text.trim().slice(0, DECLARED_TEXT_MAX_LENGTH) };
+}
+
 function hydrateTurn(value: unknown): Turn | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -89,6 +110,7 @@ function hydrateTurn(value: unknown): Turn | null {
     outcome: oneOf(TURN_OUTCOMES, record.outcome) ?? "completed",
     completedAt,
     contextIncomplete: record.contextIncomplete === true,
+    declared: hydrateDeclared(record.declared),
   };
 }
 
@@ -209,6 +231,7 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     deferredUntil,
     deferToQueue: deferredUntil !== null && record.deferToQueue === true,
     interruptedAt: finiteNumber(record.interruptedAt),
+    interruptNotifiedAt: finiteNumber(record.interruptNotifiedAt),
     // Resume progress is runtime-only: nothing is mid-resume right after a load.
     resumeState: "idle",
     resumeError: null,

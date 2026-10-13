@@ -20,7 +20,7 @@ import {
   type AnnouncementKind,
   type SpeechSettings,
 } from "../shared/speech";
-import { speechOf, type Analysis, type TurnOutcome } from "../shared/types";
+import { speechOf, type Analysis, type Declared, type TurnOutcome } from "../shared/types";
 import type { AnnouncementFeed } from "./announcements";
 import { permissionRowId, turnRowId, type CardPublisher } from "./cards";
 import type { PaseoApi } from "./host-types";
@@ -40,6 +40,7 @@ export type Notifier = {
     turnId: string,
     analysis: Analysis,
     outcome: TurnOutcome,
+    declared?: Declared | null,
   ): Promise<void>;
   turnFailed(paseo: PaseoApi, agent: NotifyAgent, turnId: string, error: string): Promise<void>;
   turnSuperseded(paseo: PaseoApi, agent: NotifyAgent, turnId: string): Promise<void>;
@@ -56,10 +57,21 @@ export type Notifier = {
   ): Promise<void>;
 };
 
-/** Which announcement a finished analysis becomes: a failed turn, a hand-off to the user, or plain completion. */
-export function announcementKindFor(analysis: Analysis, outcome: TurnOutcome): AnnouncementKind {
+/**
+ * Which announcement a finished analysis becomes: a failed turn, a hand-off to
+ * the user, or plain completion. The agent's own declared result wins over the
+ * analysis, matching the board status.
+ */
+export function announcementKindFor(
+  analysis: Analysis,
+  outcome: TurnOutcome,
+  declared: Declared | null = null,
+): AnnouncementKind {
   if (outcome === "failed") {
     return "error";
+  }
+  if (declared) {
+    return declared.kind === "done" ? "finished" : "waiting";
   }
   if (
     analysis.needsUserAttention ||
@@ -123,9 +135,10 @@ export class CardNotifier implements Notifier {
     turnId: string,
     analysis: Analysis,
     outcome: TurnOutcome,
+    declared: Declared | null = null,
   ): Promise<void> {
-    this.announce(agent, announcementKindFor(analysis, outcome), speechOf(analysis));
-    await this.card(paseo, agent.id, turnRowId(turnId), readyTurnCard(analysis));
+    this.announce(agent, announcementKindFor(analysis, outcome, declared), speechOf(analysis));
+    await this.card(paseo, agent.id, turnRowId(turnId), readyTurnCard(analysis, declared));
   }
 
   turnFailed(paseo: PaseoApi, agent: NotifyAgent, turnId: string, error: string): Promise<void> {

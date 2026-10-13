@@ -45,6 +45,11 @@ describe("announcement kinds", () => {
     expect(announcementKindFor(analysis({ status: "blocked" }), "completed")).toBe("waiting");
     expect(announcementKindFor(analysis({ needsUserAttention: true }), "completed")).toBe("waiting");
     expect(announcementKindFor(analysis(), "failed")).toBe("error");
+    expect(announcementKindFor(analysis(), "completed", { kind: "blocked", text: "x" })).toBe("waiting");
+    expect(
+      announcementKindFor(analysis({ needsUserAttention: true }), "completed", { kind: "done", text: "x" }),
+    ).toBe("finished");
+    expect(announcementKindFor(analysis(), "failed", { kind: "done", text: "x" })).toBe("error");
     expect(permissionAnnouncementKind({ id: "r", kind: "question" })).toBe("waiting");
     expect(permissionAnnouncementKind({ id: "r", kind: "tool" })).toBe("permission");
   });

@@ -18,9 +18,14 @@ import {
   STATUS_OPTIONS,
   workspaceLabel,
 } from "../shared/presentation";
-import { isActiveLiveness, type SessionDetail, type Turn } from "../shared/types";
+import {
+  DECLARED_KIND_LABELS,
+  isActiveLiveness,
+  type SessionDetail,
+  type Turn,
+} from "../shared/types";
 import { Badge, Chip } from "./badge";
-import { columnTone, errorText, formatDateTime, statusTone } from "./styles";
+import { columnTone, declaredTone, errorText, formatDateTime, statusTone } from "./styles";
 import { SNAPSHOT_QUERY_KEY, useSessionActions } from "./use-snapshot";
 
 const OUTCOME_LABELS: Record<Turn["outcome"], string> = {
@@ -371,6 +376,21 @@ export function DetailContent(props: {
           <Text style={{ color: colors.statusDanger, fontSize: 12, lineHeight: 18 }}>
             {session.analysisError}
           </Text>
+        ) : null}
+        {session.declared ? (
+          <View style={{ gap: 3 }}>
+            <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "600" }}>Agent 结论</Text>
+            <Text
+              selectable
+              style={{
+                color: declaredTone(theme, session.declared.kind),
+                fontSize: 12,
+                lineHeight: 18,
+              }}
+            >
+              {`${DECLARED_KIND_LABELS[session.declared.kind]}：${session.declared.text}`}
+            </Text>
+          </View>
         ) : null}
         {analysis ? (
           <View style={{ gap: 10 }}>

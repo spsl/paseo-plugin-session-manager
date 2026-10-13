@@ -95,6 +95,7 @@ export function newRecord(
     deferredUntil: null,
     deferToQueue: false,
     interruptedAt: null,
+    interruptNotifiedAt: null,
     resumeState: "idle",
     resumeError: null,
     titleState: { lastWritten: null, userOwned: false, lastWriteError: null },

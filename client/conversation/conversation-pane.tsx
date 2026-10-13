@@ -21,7 +21,7 @@ import { errorText } from "../styles";
 import { SNAPSHOT_QUERY_KEY } from "../use-snapshot";
 import { Composer, type SendMode } from "./composer";
 import { useComposerDraft } from "./drafts";
-import { isNearBottom } from "./model";
+import { isNearBottom, steerText } from "./model";
 import {
   enqueueMessage,
   popQueuedMessage,
@@ -124,7 +124,7 @@ export function ConversationPane(props: {
       if (mode === "send") {
         await handle.send(text);
       } else {
-        await handle.send(text, { activeTurnBehavior: mode });
+        await handle.send(mode === "steer" ? steerText(text) : text, { activeTurnBehavior: mode });
       }
       setDraft("");
       jumpToBottom();
