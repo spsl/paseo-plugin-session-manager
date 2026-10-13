@@ -3,7 +3,7 @@
  * command showing `/name argumentHint` with the description below; the
  * highlighted row uses surface2.
  */
-import { Pressable, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import type { SlashCommandEntry } from "./composer-logic";
 import type { ComposerPalette } from "./composer-tokens";
 
@@ -29,12 +29,15 @@ export function SlashPopover(props: {
         borderColor: palette.border,
         borderRadius: 8,
         padding: 4,
-        gap: 2,
-        maxHeight: 240,
         overflow: "hidden",
         zIndex: 60,
       }}
     >
+      <ScrollView
+        style={{ maxHeight: 240 }}
+        contentContainerStyle={{ gap: 2 }}
+        keyboardShouldPersistTaps="always"
+      >
       {props.entries.slice(0, MAX_ROWS).map(function renderEntry(entry, index) {
         const active = index === props.highlight;
         return (
@@ -62,6 +65,7 @@ export function SlashPopover(props: {
           </Pressable>
         );
       })}
+      </ScrollView>
     </View>
   );
 }

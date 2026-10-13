@@ -29,12 +29,8 @@ export function enqueueMessage(
   input: { text: string; images: readonly ComposerImage[] },
 ): QueuedMessage {
   const message: QueuedMessage = { id: `q${nextId++}`, text: input.text, images: input.images };
-  const list = queues.get(sessionId);
-  if (list) {
-    list.push(message);
-  } else {
-    queues.set(sessionId, [message]);
-  }
+  // Immutable updates: useSyncExternalStore compares snapshots by reference.
+  queues.set(sessionId, [...(queues.get(sessionId) ?? []), message]);
   emit(sessionId);
   return message;
 }
@@ -42,28 +38,29 @@ export function enqueueMessage(
 /** Removes and returns the entry, or null when it no longer exists. */
 export function takeQueuedMessage(sessionId: string, id: string): QueuedMessage | null {
   const list = queues.get(sessionId);
-  if (!list) {
+  const index =
+    list === undefined
+      ? -1
+      : list.findIndex(function byId(m) {
+          return m.id === id;
+        });
+  if (index < 0 || list === undefined) {
     return null;
   }
-  const index = list.findIndex(function byId(m) {
-    return m.id === id;
-  });
-  if (index < 0) {
-    return null;
-  }
-  const [message] = list.splice(index, 1);
+  const message = list[index];
+  queues.set(
+    sessionId,
+    list.filter(function keep(candidate) {
+      return candidate !== message;
+    }),
+  );
   emit(sessionId);
   return message;
 }
 
 /** Puts a message back at the head after a failed send attempt. */
 export function requeueFront(sessionId: string, message: QueuedMessage): void {
-  const list = queues.get(sessionId);
-  if (list) {
-    list.unshift(message);
-  } else {
-    queues.set(sessionId, [message]);
-  }
+  queues.set(sessionId, [message, ...(queues.get(sessionId) ?? [])]);
   emit(sessionId);
 }
 
