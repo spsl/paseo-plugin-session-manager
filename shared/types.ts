@@ -68,6 +68,18 @@ export const BoardColumnSchema = z.enum(BOARD_COLUMNS);
 /** Max characters of the one-sentence spoken/card summary. */
 export const SPEECH_MAX_LENGTH = 80;
 
+/** Max characters of one 之前 / 下一步 item. */
+export const STEP_MAX_LENGTH = 40;
+
+/** Max characters of the 现在 sentence. */
+export const NOW_MAX_LENGTH = 60;
+
+/** Max 之前 items one analysis may add. */
+export const MAX_DONE_ITEMS = 3;
+
+/** Max persisted 之前 entries per session. */
+export const MAX_HISTORY_ENTRIES = 40;
+
 export const AnalysisSchema = z.object({
   /** A concise, model-generated description of the current task. */
   title: z.string(),
@@ -82,6 +94,10 @@ export const AnalysisSchema = z.object({
   blockers: z.array(z.string()),
   needsUserAttention: z.boolean(),
   confidence: z.number(),
+  /** What the newly analyzed turns finished; appended to the session history. Absent on older analyses. */
+  done: z.array(z.string()).optional(),
+  /** One short sentence on what the session is doing or waiting on. Absent on older analyses. */
+  now: z.string().optional(),
 });
 export type Analysis = z.infer<typeof AnalysisSchema>;
 
@@ -137,6 +153,15 @@ export const TurnSchema = z.object({
   declared: DeclaredSchema.nullable().optional(),
 });
 export type Turn = z.infer<typeof TurnSchema>;
+
+/** One 之前 item, kept across analyses beyond the stored turn window. */
+export const HistoryEntrySchema = z.object({
+  /** The turn whose analysis produced it; reanalyzing that turn replaces its items. */
+  turnId: z.string(),
+  at: z.number(),
+  text: z.string(),
+});
+export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
 
 export const TitleStateSchema = z.object({
   /** The last title this plugin wrote to the Paseo agent. */
@@ -205,5 +230,7 @@ export type SessionView = z.infer<typeof SessionViewSchema>;
 export const SessionDetailSchema = SessionViewSchema.extend({
   turns: z.array(TurnSchema),
   firstUserMessage: z.string().nullable(),
+  /** 之前 items, oldest first. */
+  history: z.array(HistoryEntrySchema),
 });
 export type SessionDetail = z.infer<typeof SessionDetailSchema>;

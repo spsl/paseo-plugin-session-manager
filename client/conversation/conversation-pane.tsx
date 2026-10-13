@@ -33,23 +33,24 @@ import {
 import { PermissionCards } from "./permission-cards";
 import { responseFor, visiblePermissions, type PermissionChoice } from "./permissions";
 import { RowView } from "./rows";
-import { useConversation } from "./use-conversation";
+import type { Conversation } from "./use-conversation";
 
 /** Sessions whose queue is draining; module-level so a reopened pane never sends twice. */
 const flushingSessions = new Set<string>();
 
 export function ConversationPane(props: {
   sessionId: string;
+  /** Owned by the overlay so the overview pane reads the same live state. */
+  conversation: Conversation;
   theme: PluginTheme;
   live: boolean;
   compact: boolean;
 }) {
-  const { sessionId, theme, live, compact } = props;
+  const { sessionId, conversation, theme, live, compact } = props;
   const { colors } = theme;
   const toast = useToast();
   const queryClient = useQueryClient();
   const stopCall = useRpc(stopAgentRpc);
-  const conversation = useConversation(sessionId);
   const { handle, state, agent } = conversation;
 
   const { draft, setDraft } = useComposerDraft(sessionId);

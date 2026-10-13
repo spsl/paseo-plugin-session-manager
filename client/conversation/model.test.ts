@@ -3,6 +3,7 @@ import {
   appendItem,
   entriesToRows,
   isNearBottom,
+  liveActivity,
   mergeStreamEvent,
   prependOlder,
   splitFences,
@@ -202,5 +203,54 @@ describe("steerText", () => {
     expect(steerText("顺便把测试也跑一下")).toBe(
       "[追加说明] 这是对当前任务的补充，不是替换：继续完成原目标，在本轮最终回复中一并体现，不要单独确认。\n顺便把测试也跑一下",
     );
+  });
+});
+
+describe("liveActivity", () => {
+  const user = (text: string): Row => ({ kind: "user", key: text, text, messageId: null });
+  const tool = (command: string): Row => ({
+    kind: "tool",
+    key: command,
+    callId: command,
+    name: "Bash",
+    status: "running",
+    detail: { type: "shell", command },
+    error: null,
+  });
+
+  it("reads the latest user message, steer prefix removed, and the latest tool", () => {
+    const rows = [user("旧任务"), tool("ls"), user(steerText("再加一个测试")), tool("npm test")];
+    expect(liveActivity(rows)).toEqual({
+      userText: "再加一个测试",
+      activity: "Bash：npm test",
+      pendingTodos: [],
+    });
+  });
+
+  it("prefers the in-progress todo and lists the pending ones", () => {
+    const rows: Row[] = [
+      user("做事"),
+      {
+        kind: "todo",
+        key: "todo",
+        items: [
+          { text: "读代码", completed: true, inProgress: false },
+          { text: "改界面", completed: false, inProgress: true },
+          { text: "跑测试", completed: false, inProgress: false },
+        ],
+      },
+      tool("npm test"),
+    ];
+    expect(liveActivity(rows)).toEqual({ userText: "做事", activity: "改界面", pendingTodos: ["跑测试"] });
+  });
+
+  it("ignores todo lists from earlier turns", () => {
+    const rows: Row[] = [
+      user("旧"),
+      { kind: "todo", key: "todo", items: [{ text: "旧计划", completed: false, inProgress: true }] },
+      user("新"),
+    ];
+    expect(liveActivity(rows)).toEqual({ userText: "新", activity: null, pendingTodos: [] });
+    expect(liveActivity([])).toEqual({ userText: null, activity: null, pendingTodos: [] });
   });
 });

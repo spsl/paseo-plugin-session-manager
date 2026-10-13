@@ -107,6 +107,8 @@ export function newRecord(
     firstUserMessage: null,
     firstUserMessageKnown: false,
     analyzedTurnId: null,
+    history: [],
+    historyBaseTurnId: null,
     labels: {},
     labelsKnown: false,
   };

@@ -293,6 +293,11 @@ export const TOOL_TEXT_LIMIT = 4000;
 export const STEER_PREFIX =
   "[追加说明] 这是对当前任务的补充，不是替换：继续完成原目标，在本轮最终回复中一并体现，不要单独确认。";
 
+/** The user's own words of a message, steer prefix removed. */
+export function withoutSteerPrefix(text: string): string {
+  return text.startsWith(STEER_PREFIX) ? text.slice(STEER_PREFIX.length) : text;
+}
+
 /** The text sent for a steer (wording borrowed from Multica's additional guidance). */
 export function steerText(text: string): string {
   return `${STEER_PREFIX}\n${text}`;
@@ -372,4 +377,47 @@ export type StickMetrics = { contentHeight: number; offsetY: number; viewportHei
 /** True when the viewport is close enough to the bottom to keep following new content. */
 export function isNearBottom(metrics: StickMetrics, threshold: number = 80): boolean {
   return metrics.contentHeight - (metrics.offsetY + metrics.viewportHeight) <= threshold;
+}
+
+/** What the agent is working on, read from the rows after the latest user message. */
+export type LiveActivity = {
+  /** The latest user message, steer prefix removed. */
+  userText: string | null;
+  /** The in-progress todo item, else the latest tool call. */
+  activity: string | null;
+  /** Todo items not started yet. */
+  pendingTodos: string[];
+};
+
+export function liveActivity(rows: readonly Row[]): LiveActivity {
+  let start = rows.length;
+  let userText: string | null = null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind === "user") {
+      start = index + 1;
+      userText = withoutSteerPrefix(row.text).trim() || null;
+      break;
+    }
+  }
+  let todo: TodoEntry[] | null = null;
+  let tool: string | null = null;
+  for (let index = rows.length - 1; index >= start; index -= 1) {
+    const row = rows[index];
+    if (todo === null && row?.kind === "todo") {
+      todo = row.items;
+    }
+    if (tool === null && row?.kind === "tool") {
+      const summary = toolSummary(row.detail);
+      tool = summary ? `${row.name}：${summary}` : row.name;
+    }
+  }
+  const current = todo?.find((entry) => entry.inProgress && !entry.completed) ?? null;
+  return {
+    userText,
+    activity: current ? current.text : tool,
+    pendingTodos: (todo ?? [])
+      .filter((entry) => !entry.completed && !entry.inProgress)
+      .map((entry) => entry.text),
+  };
 }

@@ -35,6 +35,7 @@ import { projectDetail, projectView } from "./projection";
 import {
   MAX_TURNS_PER_SESSION,
   copyRecord,
+  withTurnHistory,
   type SessionRecord,
   type StateStore,
 } from "./store";
@@ -694,7 +695,11 @@ export class SessionManagerService {
     }
   }
 
-  private buildInput(record: SessionRecord): AnalyzerInput {
+  private buildInput(
+    record: SessionRecord,
+    targetTurnId: string,
+    historyTurnId: string | null,
+  ): AnalyzerInput {
     return {
       session: {
         id: record.id,
@@ -708,6 +713,10 @@ export class SessionManagerService {
       },
       turns: record.turns.slice(-5).map((turn) => ({ ...turn })),
       previousAnalysis: record.analysis ? copyRecord(record).analysis : null,
+      history: record.history
+        .filter((entry) => entry.turnId !== targetTurnId)
+        .map((entry) => entry.text),
+      historyTurnId,
     };
   }
 
@@ -749,13 +758,25 @@ export class SessionManagerService {
     if (!targetTurnId) {
       return;
     }
+    // Reanalyzing a turn reuses its boundary, so the same turns count as new.
+    // With no other history yet (older sessions) every stored turn counts as new.
+    const reanalyzing = record.analyzedTurnId === targetTurnId;
+    const hasOtherHistory = record.history.some((entry) => entry.turnId !== targetTurnId);
+    const historyTurnId = !hasOtherHistory
+      ? null
+      : reanalyzing
+        ? record.historyBaseTurnId
+        : record.analyzedTurnId;
     record.analysisState = "running";
     record.analysisError = null;
     let result: Analysis | null = null;
     let failure: string | null = null;
     try {
       const config = this.runConfig();
-      result = await this.analyzerFor(config.agent).analyze(this.buildInput(record), config);
+      result = await this.analyzerFor(config.agent).analyze(
+        this.buildInput(record, targetTurnId, historyTurnId),
+        config,
+      );
     } catch (error) {
       failure = describeAnalysisError(error);
     }
@@ -773,12 +794,19 @@ export class SessionManagerService {
       return;
     }
     if (result) {
+      const turn = current.turns.at(-1);
       current.analysis = result;
       current.analysisState = "ready";
       current.analysisError = null;
       current.analyzedTurnId = targetTurnId;
+      current.history = withTurnHistory(
+        current.history,
+        targetTurnId,
+        turn?.completedAt ?? this.now(),
+        result.done,
+      );
+      current.historyBaseTurnId = historyTurnId;
       this.persist();
-      const turn = current.turns.at(-1);
       this.finishTurnCard(id, targetTurnId, {
         analysis: result,
         turnOutcome: turn?.outcome ?? "completed",

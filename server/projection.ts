@@ -97,5 +97,6 @@ export function projectDetail(record: SessionRecord, now: number = Date.now()): 
     ...projectView(record, now),
     turns: record.turns.map((turn) => ({ ...turn })),
     firstUserMessage: record.firstUserMessage,
+    history: record.history.map((entry) => ({ ...entry })),
   };
 }

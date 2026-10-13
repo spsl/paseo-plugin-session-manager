@@ -164,6 +164,47 @@ describe("SessionManagerService", () => {
     expect(service.getRecord("a1")?.analysis?.title).toBe("最新");
   });
 
+  it("accumulates 之前 items per turn and replaces a turn's items on reanalysis", async () => {
+    const { analyzer, calls } = fakeAnalyzer();
+    const { service } = make({}, analyzer);
+    service.onTurnEnded(turnEnded("t1", "一", "a1", "第一件"));
+    await tick();
+    expect(calls[0].input.historyTurnId).toBeNull();
+    calls[0].resolve({ ...analysis(), done: ["做完一"] });
+    await service.waitForIdle();
+
+    service.onTurnEnded(turnEnded("t2", "二", "a1", "第二件"));
+    await tick();
+    expect(calls[1].input.history).toEqual(["做完一"]);
+    expect(calls[1].input.historyTurnId).toBe("t1");
+    calls[1].resolve({ ...analysis(), done: ["做完二"] });
+    await service.waitForIdle();
+    expect(service.getRecord("a1")?.history.map((entry) => entry.text)).toEqual(["做完一", "做完二"]);
+
+    expect(service.reanalyze("a1").ok).toBe(true);
+    await tick();
+    // Same boundary as t2's first run, without t2's own items.
+    expect(calls[2].input.historyTurnId).toBe("t1");
+    expect(calls[2].input.history).toEqual(["做完一"]);
+    calls[2].resolve({ ...analysis(), done: ["重做二"] });
+    await service.waitForIdle();
+    expect(service.detail("a1")?.history.map((entry) => entry.text)).toEqual(["做完一", "重做二"]);
+  });
+
+  it("keeps the history when an analysis carries no done field", async () => {
+    const { analyzer, calls } = fakeAnalyzer();
+    const { service } = make({}, analyzer);
+    service.onTurnEnded(turnEnded("t1", "一"));
+    await tick();
+    calls[0].resolve({ ...analysis(), done: ["做完一"] });
+    await service.waitForIdle();
+    service.reanalyze("a1");
+    await tick();
+    calls[1].resolve(analysis());
+    await service.waitForIdle();
+    expect(service.getRecord("a1")?.history.map((entry) => entry.text)).toEqual(["做完一"]);
+  });
+
   it("respects the concurrency limit", async () => {
     const { analyzer, calls } = fakeAnalyzer();
     const { service } = make({ concurrency: 2 }, analyzer);

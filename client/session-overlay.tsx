@@ -7,16 +7,24 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
-import { analysisStatusLabel, resumeStateLabel, sessionTitle } from "../shared/presentation";
+import {
+  analysisStatusLabel,
+  resumeStateLabel,
+  sessionTitle,
+  workspaceLabel,
+  type LiveState,
+} from "../shared/presentation";
 import { isActiveLiveness, type SessionDetail } from "../shared/types";
 import { Badge, Chip } from "./badge";
 import { ConversationPane } from "./conversation/conversation-pane";
+import { liveActivity } from "./conversation/model";
+import { useConversation } from "./conversation/use-conversation";
 import { DeferMenu } from "./defer-menu";
 import { DetailContent, useDetailActions } from "./detail-content";
 import { columnTone, errorText, statusTone } from "./styles";
-import { markDeferEndSeen, useDetail } from "./use-snapshot";
+import { markDeferEndSeen, useDetail, useSessionActions } from "./use-snapshot";
 
 type Props = {
   sessionId: string | null;
@@ -86,7 +94,6 @@ export function SessionOverlay(props: Props) {
         session={session}
         theme={theme}
         compact={compact}
-        onDefer={openDefer}
       />
     );
   }
@@ -151,6 +158,7 @@ export function SessionOverlay(props: Props) {
               </Text>
             ) : null}
           </View>
+          {session ? <HeaderPlace session={session} theme={theme} compact={compact} /> : null}
           {session ? (
             <HeaderActions
               key={session.id}
@@ -158,6 +166,7 @@ export function SessionOverlay(props: Props) {
               theme={theme}
               navigation={props.navigation}
               onClose={onClose}
+              onDefer={openDefer}
             />
           ) : null}
           {session ? <HeaderBadges session={session} theme={theme} /> : null}
@@ -181,6 +190,33 @@ export function SessionOverlay(props: Props) {
           setDeferOpen(false);
         }}
       />
+    </View>
+  );
+}
+
+/** Project and workspace in the header middle; hidden on compact layouts. */
+function HeaderPlace(props: { session: SessionDetail; theme: PluginTheme; compact: boolean }) {
+  const { session, theme } = props;
+  const { colors } = theme;
+  if (props.compact) {
+    return null;
+  }
+  const rows: [string, string][] = [
+    ["Folder", session.projectName ?? "未知项目"],
+    ["Layers", workspaceLabel(session)],
+  ];
+  return (
+    <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+      {rows.map(function renderRow(row) {
+        return (
+          <View key={row[0]} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Icon name={row[0]} size={13} color={colors.foregroundMuted} />
+            <Text selectable numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: 13 }}>
+              {row[1]}
+            </Text>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -217,15 +253,32 @@ function HeaderActions(props: {
   theme: PluginTheme;
   navigation: PluginScreenProps["navigation"];
   onClose(): void;
+  onDefer?(): void;
 }) {
-  const { theme } = props;
+  const { theme, session } = props;
+  const sessionActions = useSessionActions();
   const act = useDetailActions({
-    session: props.session,
+    session,
     navigation: props.navigation,
     onClose: props.onClose,
   });
+  // Same icons as the board card: Timer defers, TimerOff resumes.
+  const canDefer = isActiveLiveness(session.liveness) && props.onDefer !== undefined;
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+      {canDefer && session.deferredUntil !== null ? (
+        <HeaderIconButton
+          theme={theme}
+          icon="TimerOff"
+          label="立即恢复显示"
+          onPress={function resume() {
+            void sessionActions.clearDefer(session.id);
+          }}
+        />
+      ) : null}
+      {canDefer && session.deferredUntil === null && props.onDefer ? (
+        <HeaderIconButton theme={theme} icon="Timer" label="延迟显示" onPress={props.onDefer} />
+      ) : null}
       {act.openAgent ? (
         <HeaderIconButton theme={theme} icon="ExternalLink" label="打开 Agent" onPress={act.openAgent} />
       ) : null}
@@ -289,12 +342,28 @@ function OverlayBody(props: {
   session: SessionDetail;
   theme: PluginTheme;
   compact: boolean;
-  onDefer?(): void;
 }) {
   const { session, theme, compact } = props;
   // Dormant sessions reopen the conversation tab: sending a message resumes them.
   const active = isActiveLiveness(session.liveness);
   const [tab, setTab] = useState<Tab>(active ? "conversation" : "overview");
+  // One live conversation for both panes, kept across compact tab switches.
+  const live = useConversation(session.id);
+  const rows = live.state.rows;
+  const activity = useMemo(
+    function read() {
+      return liveActivity(rows);
+    },
+    [rows],
+  );
+  const liveState: LiveState | null = live.loading
+    ? null
+    : {
+        running: live.agent.running,
+        pendingPermissions: live.agent.pending.length,
+        userText: activity.userText,
+        activity: activity.activity,
+      };
 
   const overview = (
     <ScrollView
@@ -302,11 +371,22 @@ function OverlayBody(props: {
       contentContainerStyle={{ padding: 14, gap: 16 }}
       keyboardShouldPersistTaps="handled"
     >
-      <DetailContent session={session} theme={theme} onDefer={props.onDefer} />
+      <DetailContent
+        session={session}
+        theme={theme}
+        live={liveState}
+        pendingTodos={activity.pendingTodos}
+      />
     </ScrollView>
   );
   const conversation = (
-    <ConversationPane sessionId={session.id} theme={theme} live={active} compact={compact} />
+    <ConversationPane
+      sessionId={session.id}
+      conversation={live}
+      theme={theme}
+      live={active}
+      compact={compact}
+    />
   );
 
   if (compact) {
