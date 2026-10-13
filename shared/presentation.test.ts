@@ -3,6 +3,8 @@ import {
   analysisStatusLabel,
   branchLabel,
   columnForStatus,
+  deferClockLabel,
+  deferClockTimestamp,
   formatDeferRemaining,
   formatDeferUntil,
   formatShortTimeAgo,
@@ -83,5 +85,16 @@ describe("board presentation", () => {
 
     expect(formatDeferUntil(now + 3_600_000, now)).toBe("11:30");
     expect(formatDeferUntil(now + 40 * 3_600_000, now)).toBe("6月17日 02:30");
+  });
+
+  it("resolves absolute defer targets to local wall-clock time", () => {
+    const now = new Date(2026, 5, 15, 10, 30, 0).getTime();
+    expect(deferClockTimestamp({ dayOffset: 0, hour: 14 }, now)).toBe(
+      new Date(2026, 5, 15, 14, 0, 0).getTime(),
+    );
+    expect(deferClockTimestamp({ dayOffset: 2, hour: 9 }, now)).toBe(
+      new Date(2026, 5, 17, 9, 0, 0).getTime(),
+    );
+    expect(deferClockLabel({ dayOffset: 1, hour: 18 })).toBe("至明天 18:00");
   });
 });

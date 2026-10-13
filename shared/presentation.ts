@@ -23,6 +23,7 @@ export const COLUMNS: readonly { id: BoardColumn; label: string; hint: string }[
 
 /** Fixed defer durations offered by the card button and the detail pane. */
 export const DEFER_DURATIONS: readonly { ms: number; label: string }[] = [
+  { ms: 60_000, label: "1 分钟" },
   { ms: 30 * 60_000, label: "30 分钟" },
   { ms: 60 * 60_000, label: "1 小时" },
   { ms: 4 * 60 * 60_000, label: "4 小时" },
@@ -31,6 +32,35 @@ export const DEFER_DURATIONS: readonly { ms: number; label: string }[] = [
   { ms: 2 * 24 * 60 * 60_000, label: "2 天" },
   { ms: 4 * 24 * 60 * 60_000, label: "4 天" },
 ];
+
+const DAY_NAMES = ["今天", "明天", "后天"];
+
+/** Absolute defer targets: day offset from today plus an hour of the day. */
+export const DEFER_CLOCK_TARGETS: readonly { dayOffset: number; hour: number }[] = [
+  { dayOffset: 0, hour: 14 },
+  { dayOffset: 0, hour: 18 },
+  { dayOffset: 1, hour: 9 },
+  { dayOffset: 1, hour: 14 },
+  { dayOffset: 1, hour: 18 },
+  { dayOffset: 2, hour: 9 },
+  { dayOffset: 2, hour: 14 },
+  { dayOffset: 2, hour: 18 },
+];
+
+export function deferClockLabel(target: { dayOffset: number; hour: number }): string {
+  return `至${DAY_NAMES[target.dayOffset]} ${target.hour}:00`;
+}
+
+/** Timestamp of the target's local wall-clock time, relative to `now`. */
+export function deferClockTimestamp(
+  target: { dayOffset: number; hour: number },
+  now: number,
+): number {
+  const date = new Date(now);
+  date.setDate(date.getDate() + target.dayOffset);
+  date.setHours(target.hour, 0, 0, 0);
+  return date.getTime();
+}
 
 export const STATUS_OPTIONS: readonly { status: AnalysisStatus; label: string }[] = [
   { status: "waiting_for_user", label: "需要处理" },

@@ -92,6 +92,24 @@ function SessionCardView(props: Props) {
         {working || running || resuming ? (
           <ActivityIndicator size="small" color={colors.accent} />
         ) : null}
+        {session.deferEndedAt !== null ? (
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 3,
+              paddingHorizontal: 7,
+              paddingVertical: 2,
+              borderRadius: 999,
+              backgroundColor: colors.accent,
+            }}
+          >
+            <Icon name="Timer" size={11} color={colors.accentForeground} />
+            <Text style={{ color: colors.accentForeground, fontSize: 11, fontWeight: "700" }}>
+              延迟已结束
+            </Text>
+          </View>
+        ) : null}
       </View>
       <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>
         {`工作区：${workspaceLabel(session)}${branch ? `  ·  分支：${branch}` : ""}`}
@@ -140,9 +158,6 @@ function SessionCardView(props: Props) {
         </Pressable>
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
-        {session.deferEndedAt !== null ? (
-          <Badge theme={theme} label="延迟已结束" tone={colors.accent} />
-        ) : null}
         {resume !== null ? (
           <Badge
             theme={theme}
