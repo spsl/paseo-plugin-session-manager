@@ -102,6 +102,51 @@ export function filterSessionsByProject(
   });
 }
 
+/**
+ * Case-insensitive substring search over chip labels. A blank query is no
+ * search at all and returns null, so callers can tell it apart from no hits.
+ */
+export function searchProjectOptions(
+  options: readonly ProjectFilterOption[],
+  query: string,
+): readonly ProjectFilterOption[] | null {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") {
+    return null;
+  }
+  return options.filter(function hit(option) {
+    return option.label.toLowerCase().includes(needle);
+  });
+}
+
+/**
+ * Sessions of the projects a search hit, narrowed further by the selected
+ * chips the search still shows. A selected chip the search hides is ignored,
+ * so the board falls back to every hit rather than going blank.
+ */
+export function filterSessionsByProjectSearch(
+  sessions: readonly SessionView[],
+  projectKeyBySessionId: ReadonlyMap<string, string>,
+  selectedProjectKeys: ReadonlySet<string>,
+  hits: readonly ProjectFilterOption[] | null,
+): readonly SessionView[] {
+  if (hits === null) {
+    return filterSessionsByProject(sessions, projectKeyBySessionId, selectedProjectKeys);
+  }
+  const visibleSelection = retainAvailableProjectSelection(selectedProjectKeys, hits);
+  const scope =
+    visibleSelection.size > 0
+      ? visibleSelection
+      : new Set(
+          hits.map(function keyOf(option) {
+            return option.key;
+          }),
+        );
+  return sessions.filter(function inScope(session) {
+    return scope.has(projectKeyBySessionId.get(session.id) ?? UNKNOWN_PROJECT_KEY);
+  });
+}
+
 export function retainAvailableProjectSelection(
   selectedProjectKeys: ReadonlySet<string>,
   options: readonly ProjectFilterOption[],

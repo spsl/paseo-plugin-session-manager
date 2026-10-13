@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildProjectFilter,
   filterSessionsByProject,
+  filterSessionsByProjectSearch,
   retainAvailableProjectSelection,
+  searchProjectOptions,
 } from "./project-filter";
 import { makeSession } from "./test-fixtures";
 
@@ -65,5 +67,38 @@ describe("project filter", () => {
     ).toEqual(["one"]);
     expect(filterSessionsByProject(sessions, filter.projectKeyBySessionId, new Set())).toHaveLength(2);
     expect(retainAvailableProjectSelection(selected, filter.options)).toEqual(new Set(["k1"]));
+  });
+
+  it("searches chip labels by case-insensitive substring", () => {
+    const filter = buildProjectFilter([
+      session("a", "k1", "sunsai-1022-enterrequest", 3),
+      session("b", "k2", "Sunsai-1022-FunctionCall", 2),
+      session("c", "k3", "paseo-session-manager-plugin", 1),
+    ]);
+    expect(searchProjectOptions(filter.options, "  ")).toBeNull();
+    expect(searchProjectOptions(filter.options, "1022")?.map(({ key }) => key)).toEqual(["k1", "k2"]);
+    expect(searchProjectOptions(filter.options, "functioncall")?.map(({ key }) => key)).toEqual(["k2"]);
+    expect(searchProjectOptions(filter.options, "1d2")).toEqual([]);
+  });
+
+  it("shows the sessions of every hit, narrowed by visible selected chips", () => {
+    const sessions = [
+      session("a", "k1", "sunsai-1022-a", 3),
+      session("b", "k2", "sunsai-1022-b", 2),
+      session("c", "k3", "plugin", 1),
+    ];
+    const filter = buildProjectFilter(sessions);
+    const map = filter.projectKeyBySessionId;
+    const ids = (selected: Set<string>, query: string) =>
+      filterSessionsByProjectSearch(sessions, map, selected, searchProjectOptions(filter.options, query)).map(
+        ({ id }) => id,
+      );
+    expect(ids(new Set(), "")).toEqual(["a", "b", "c"]);
+    expect(ids(new Set(["k3"]), "")).toEqual(["c"]);
+    expect(ids(new Set(), "1022")).toEqual(["a", "b"]);
+    expect(ids(new Set(["k2"]), "1022")).toEqual(["b"]);
+    // A selected chip the search hides does not blank the board.
+    expect(ids(new Set(["k3"]), "1022")).toEqual(["a", "b"]);
+    expect(ids(new Set(), "nothing")).toEqual([]);
   });
 });

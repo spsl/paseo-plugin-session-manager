@@ -22,6 +22,8 @@ export function Chip(props: {
   label: string;
   selected: boolean;
   tone?: string;
+  /** Tints the label without selecting, e.g. a search hit. */
+  highlighted?: boolean;
   disabled?: boolean;
   onPress(): void;
 }) {
@@ -45,7 +47,7 @@ export function Chip(props: {
     >
       <Text
         style={{
-          color: props.selected ? tone : colors.foreground,
+          color: props.selected || props.highlighted === true ? tone : colors.foreground,
           fontSize: 12,
           fontWeight: props.selected ? "600" : "400",
         }}

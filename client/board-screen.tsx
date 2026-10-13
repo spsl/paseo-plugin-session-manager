@@ -6,8 +6,9 @@ import { COLUMNS } from "../shared/presentation";
 import { ANALYZER_SETTINGS, DEFAULT_ANALYZER_SETTINGS } from "../shared/settings";
 import {
   buildProjectFilter,
-  filterSessionsByProject,
+  filterSessionsByProjectSearch,
   retainAvailableProjectSelection,
+  searchProjectOptions,
 } from "../shared/project-filter";
 import type { BoardColumn, SessionView } from "../shared/types";
 import { isDesktop, isFullscreen, setFullscreen } from "./desktop-bridge";
@@ -26,6 +27,7 @@ import {
 } from "./board-model";
 import { SingleColumn, WideColumns } from "./board-columns";
 import { DeferMenu } from "./defer-menu";
+import { ProjectSearch } from "./project-search";
 import { SessionOverlay } from "./session-overlay";
 import { columnTone, errorText } from "./styles";
 import { useSessionActions, useSnapshot } from "./use-snapshot";
@@ -140,6 +142,7 @@ export function BoardScreen(props: PluginScreenProps) {
   );
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [query, setQuery] = useState("");
   const [activeColumn, setActiveColumn] = useState<BoardColumn>("waiting_for_user");
   const [workspaceKey, setWorkspaceKey] = useState<string | null>(params.workspace ?? null);
   const paramWorkspace = params.workspace ?? null;
@@ -179,12 +182,28 @@ export function BoardScreen(props: PluginScreenProps) {
     },
     [filter.options],
   );
+  // null while the search box is blank; otherwise the matching chips.
+  const hits = useMemo(
+    function search() {
+      return searchProjectOptions(filter.options, query);
+    },
+    [filter.options, query],
+  );
+  // A selected chip the search hides stays selected for when the search
+  // clears, but only the chips still shown count as the current selection.
+  const visibleSelection = useMemo(
+    function visible() {
+      return hits === null ? selected : retainAvailableProjectSelection(selected, hits);
+    },
+    [selected, hits],
+  );
   const sessions = useMemo(
     function filtered() {
-      const byProject = filterSessionsByProject(
+      const byProject = filterSessionsByProjectSearch(
         allSessions,
         filter.projectKeyBySessionId,
         selected,
+        hits,
       );
       if (workspaceKey === null) {
         return byProject;
@@ -193,7 +212,7 @@ export function BoardScreen(props: PluginScreenProps) {
         return workspaceKeyOf(session) === workspaceKey;
       });
     },
-    [allSessions, filter, selected, workspaceKey],
+    [allSessions, filter, selected, hits, workspaceKey],
   );
   const workspaceLabel = useMemo(
     function label() {
@@ -293,8 +312,24 @@ export function BoardScreen(props: PluginScreenProps) {
     },
     [allSessions, filter, now],
   );
-  const openTotal = openCardCount(totalLayout);
-  const filtered = selected.size > 0 || workspaceKey !== null;
+  // Under a search "全部项目" means every hit, so it counts only their cards.
+  const searchLayout = useMemo(
+    function searched() {
+      if (hits === null) {
+        return totalLayout;
+      }
+      const inHits = filterSessionsByProjectSearch(
+        allSessions,
+        filter.projectKeyBySessionId,
+        new Set(),
+        hits,
+      );
+      return groupBoardCards(inHits, allSessions, now);
+    },
+    [hits, allSessions, filter, totalLayout, now],
+  );
+  const openTotal = openCardCount(searchLayout);
+  const filtered = selected.size > 0 || workspaceKey !== null || hits !== null;
   // N / M is cards vs sessions inside the current view, so N can never exceed
   // M even when a filter detaches a sub-agent into its own card.
   const countLabel = filtered
@@ -383,6 +418,8 @@ export function BoardScreen(props: PluginScreenProps) {
     );
   }
 
+  const search = <ProjectSearch theme={theme} value={query} onChange={setQuery} />;
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.surface0 }}>
       <View
@@ -394,7 +431,7 @@ export function BoardScreen(props: PluginScreenProps) {
           paddingTop: standalone ? 6 : 12,
         }}
       >
-        <View style={{ flex: 1, gap: 2 }}>
+        <View style={compact ? { flex: 1, gap: 2 } : { gap: 2 }}>
           <Text style={{ color: colors.foreground, fontSize: 16, fontWeight: "700" }}>会话看板</Text>
           {standalone ? null : (
             <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
@@ -402,6 +439,7 @@ export function BoardScreen(props: PluginScreenProps) {
             </Text>
           )}
         </View>
+        {compact ? null : <View style={{ flex: 1, marginHorizontal: 12 }}>{search}</View>}
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{countLabel}</Text>
         {desktop && !standalone ? (
           <Pressable
@@ -441,6 +479,8 @@ export function BoardScreen(props: PluginScreenProps) {
           <Icon name="Settings" size={18} color={colors.foregroundMuted} />
         </Pressable>
       </View>
+
+      {compact ? <View style={{ paddingHorizontal: 12, paddingTop: 8 }}>{search}</View> : null}
 
       {problem ? (
         <View
@@ -483,24 +523,30 @@ export function BoardScreen(props: PluginScreenProps) {
           <Chip
             theme={theme}
             label={`全部项目（${openTotal}）`}
-            selected={selected.size === 0}
+            selected={visibleSelection.size === 0}
             onPress={function clear() {
               setSelected(new Set());
             }}
           />
-          {filter.options.map(function renderOption(option) {
+          {(hits ?? filter.options).map(function renderOption(option) {
             return (
               <Chip
                 key={option.key}
                 theme={theme}
                 label={`${option.label}（${cardCountByProjectKey.get(option.key) ?? 0}）`}
                 selected={selected.has(option.key)}
+                highlighted={hits !== null}
                 onPress={function toggle() {
                   toggleProject(option.key);
                 }}
               />
             );
           })}
+          {hits !== null && hits.length === 0 ? (
+            <Text style={{ alignSelf: "center", color: colors.foregroundMuted, fontSize: 12 }}>
+              没有匹配的项目
+            </Text>
+          ) : null}
         </ScrollView>
       ) : null}
 
