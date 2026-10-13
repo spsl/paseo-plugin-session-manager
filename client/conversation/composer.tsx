@@ -34,6 +34,7 @@ import {
   primaryAction,
   rankSlashEntries,
   type KeyInfo,
+  type SendBehavior,
   type SlashCommandEntry,
   type SubmitKind,
 } from "./composer-logic";
@@ -44,6 +45,7 @@ import type { QueuedMessage } from "./queue";
 import { SlashPopover } from "./slash-popover";
 import {
   attachComposerDomListeners,
+  attachFocusShortcut,
   autofocusInput,
   canMeasureTextarea,
   domInputNode,
@@ -101,12 +103,12 @@ function QueuedRow(props: {
       </Text>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="编辑这条排队消息"
+        accessibilityLabel="编辑排队消息"
         onPress={props.onEdit}
         style={{
           width: 32,
           height: 32,
-          borderRadius: 8,
+          borderRadius: 16,
           alignItems: "center",
           justifyContent: "center",
           backgroundColor: palette.surface2,
@@ -116,12 +118,12 @@ function QueuedRow(props: {
       </Pressable>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="立即发送这条排队消息"
+        accessibilityLabel="立即发送排队消息"
         onPress={props.onSendNow}
         style={{
           width: 32,
           height: 32,
-          borderRadius: 8,
+          borderRadius: 16,
           alignItems: "center",
           justifyContent: "center",
           backgroundColor: palette.accent,
@@ -139,6 +141,7 @@ function RoundButton(props: {
   accessibilityLabel: string;
   disabled?: boolean;
   hoveredColor?: string;
+  marginLeft?: number;
   children: React.ReactNode;
 }) {
   return (
@@ -154,6 +157,7 @@ function RoundButton(props: {
           borderRadius: 14,
           alignItems: "center",
           justifyContent: "center",
+          marginLeft: props.marginLeft ?? 0,
           backgroundColor: isHovered(state)
             ? (props.hoveredColor ?? props.backgroundColor)
             : props.backgroundColor,
@@ -178,6 +182,8 @@ export function Composer(props: {
   running: boolean;
   sending: boolean;
   stopping: boolean;
+  /** Resolved send behavior (queue already degrades on pending permission). */
+  sendBehavior: SendBehavior;
   sendError: string | null;
   queued: readonly QueuedMessage[];
   onEditQueued(message: QueuedMessage): void;
@@ -218,10 +224,11 @@ export function Composer(props: {
   const [dragActive, setDragActive] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [plusHover, setPlusHover] = useState(false);
   const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [highlight, setHighlight] = useState(0);
-  const [frameWidth, setFrameWidth] = useState(0);
+  const [rowWidth, setRowWidth] = useState(0);
 
   // Resolve the underlying DOM nodes once on web; they gate DOM measuring,
   // paste/drag listeners and the "+" menu (feature detection, Hermes-safe).
@@ -304,12 +311,27 @@ export function Composer(props: {
     },
     [isWeb, props.compact],
   );
+  // Cmd/Ctrl+L focuses the input, like Paseo (web document-level listener).
+  useEffect(
+    function focusShortcut() {
+      if (!isWeb) {
+        return undefined;
+      }
+      return attachFocusShortcut(domInputNode(inputRef.current));
+    },
+    [isWeb],
+  );
   const wasBusy = useRef(false);
   useEffect(
     function refocus() {
       const busy = props.sending || props.stopping;
-      if (wasBusy.current && !busy && isWeb) {
-        focusInput(domInputNode(inputRef.current));
+      if (wasBusy.current && !busy) {
+        if (isWeb) {
+          // Web keeps focus after send/stop; native blurs after send.
+          focusInput(domInputNode(inputRef.current));
+        } else {
+          inputRef.current?.blur();
+        }
       }
       wasBusy.current = busy;
     },
@@ -347,7 +369,8 @@ export function Composer(props: {
     }
     const next = applySlashCommandReplacement(props.value, slashMatch, entry.name);
     props.onChange(next);
-    setSelection({ start: slashMatch.start + entry.name.length + 2, end: 0 });
+    const cursor = slashMatch.start + entry.name.length + 2;
+    setSelection({ start: cursor, end: cursor });
     setSlashDismissed(true);
   }
 
@@ -443,7 +466,7 @@ export function Composer(props: {
     running: props.running,
     sending: props.sending,
   });
-  const condensed: 0 | 1 | 2 = frameWidth > 0 && frameWidth < 340 ? 2 : frameWidth > 0 && frameWidth < 420 ? 1 : 0;
+  const condensed: 0 | 1 | 2 = rowWidth > 0 && rowWidth < 340 ? 2 : rowWidth > 0 && rowWidth < 420 ? 1 : 0;
 
   return (
     <View style={{ gap: 12 }}>
@@ -484,9 +507,6 @@ export function Composer(props: {
         ) : null}
         <View
           ref={boxRef}
-          onLayout={function layout(event) {
-            setFrameWidth(event.nativeEvent.layout.width);
-          }}
           style={{
             borderRadius: 16,
             borderWidth: 1,
@@ -545,10 +565,10 @@ export function Composer(props: {
               }}
               multiline
               autoCorrect={false}
-              accessibilityLabel="给 Agent 发消息"
+              accessibilityLabel="给 Agent 发消息..."
               placeholder={placeholderFor({
                 compact: props.compact,
-                slash: props.slashCommands !== null,
+                slash: true,
                 mentions: false,
               })}
               placeholderTextColor={palette.surface4}
@@ -590,6 +610,9 @@ export function Composer(props: {
           </View>
 
           <View
+            onLayout={function layout(event) {
+              setRowWidth(event.nativeEvent.layout.width);
+            }}
             style={{
               marginHorizontal: -6,
               flexDirection: "row",
@@ -598,16 +621,22 @@ export function Composer(props: {
               gap: 8,
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 2, flexShrink: 1 }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 0, flexShrink: 1 }}>
               {imageSupport ? (
                 <View style={{ position: "relative" }}>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="添加"
+                    accessibilityLabel="添加附件"
                     onPress={function toggle() {
                       setAttachOpen(function flip(open) {
                         return !open;
                       });
+                    }}
+                    onHoverIn={function in_() {
+                      setPlusHover(true);
+                    }}
+                    onHoverOut={function out() {
+                      setPlusHover(false);
                     }}
                     style={function plus(state) {
                       return {
@@ -620,7 +649,11 @@ export function Composer(props: {
                       };
                     }}
                   >
-                    <Icon name="Plus" size={16} color={palette.foregroundMuted} />
+                    <Icon
+                      name="Plus"
+                      size={16}
+                      color={plusHover ? palette.foreground : palette.foregroundMuted}
+                    />
                   </Pressable>
                   {attachOpen ? (
                     <ComposerMenu
@@ -660,10 +693,29 @@ export function Composer(props: {
                 <RoundButton
                   backgroundColor={palette.accent}
                   hoveredColor={palette.accent}
-                  accessibilityLabel="发送"
-                  disabled={props.sending}
+                  marginLeft={4}
+                  accessibilityLabel={
+                    props.sending
+                      ? props.running
+                        ? "中断 Agent"
+                        : "发送消息"
+                      : props.running
+                        ? props.sendBehavior === "queue"
+                          ? "消息排队"
+                          : props.sendBehavior === "steer"
+                            ? "发送并引导"
+                            : "发送并中断"
+                        : "发送消息"
+                  }
+                  // While the send is in flight the button shows a spinner;
+                  // pressing it mid-turn interrupts the agent (Paseo s4 note).
+                  disabled={props.sending && !props.running}
                   onPress={function send() {
-                    props.onSubmit("default");
+                    if (props.sending) {
+                      props.onStop();
+                    } else {
+                      props.onSubmit("default");
+                    }
                   }}
                 >
                   {props.sending ? (
@@ -676,7 +728,7 @@ export function Composer(props: {
                 <RoundButton
                   backgroundColor={palette.stop}
                   hoveredColor={palette.stop}
-                  accessibilityLabel="停止"
+                  accessibilityLabel={props.stopping ? "正在取消 Agent" : "停止 Agent"}
                   disabled={props.stopping}
                   onPress={function stop() {
                     props.onStop();
@@ -685,7 +737,15 @@ export function Composer(props: {
                   {props.stopping ? (
                     <ActivityIndicator size={14} color={palette.stopForeground} />
                   ) : (
-                    <Icon name="Square" size={12} color={palette.stopForeground} />
+                    // SDK Icon has no `fill`; Paseo draws a solid white square.
+                    <View
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        backgroundColor: palette.stopForeground,
+                      }}
+                    />
                   )}
                 </RoundButton>
               ) : null}

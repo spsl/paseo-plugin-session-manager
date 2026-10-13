@@ -21,6 +21,8 @@ function AnchorButton(props: {
   label?: string;
   chevron: boolean;
   pending: boolean;
+  /** Menu open or pressed -> surface0, hover -> surface2, else transparent. */
+  active: boolean;
   accessibilityLabel: string;
   onPress(): void;
 }) {
@@ -38,9 +40,12 @@ function AnchorButton(props: {
           gap: 4,
           paddingHorizontal: 8,
           borderRadius: 16,
-          backgroundColor: (state as { hovered?: boolean }).hovered === true
-            ? palette.surface2
-            : "transparent",
+          backgroundColor:
+            props.active || state.pressed
+              ? palette.surface0
+              : (state as { hovered?: boolean }).hovered === true
+                ? palette.surface2
+                : "transparent",
         };
       }}
     >
@@ -122,6 +127,7 @@ export function AgentControls(props: {
             }
             chevron={props.condensed === 0}
             pending={props.thinking.pending}
+            active={open === "thinking"}
             accessibilityLabel="选择思考档位"
             onPress={function openThinking() {
               setOpen(open === "thinking" ? null : "thinking");
@@ -149,6 +155,7 @@ export function AgentControls(props: {
             label={props.condensed >= 2 ? undefined : (modeCurrent?.label ?? "模式")}
             chevron={props.condensed === 0}
             pending={props.modes.pending}
+            active={open === "mode"}
             accessibilityLabel="切换模式"
             onPress={function openModes() {
               setOpen(open === "mode" ? null : "mode");

@@ -75,16 +75,16 @@ export function decideSubmit(
   return running ? { kind: "queue" } : { kind: "none" };
 }
 
-/** `sending` counts as running: content -> send, else running -> stop, else none. */
+/** Paseo §5.0.3: content -> send; empty+sending -> spinner (send slot); running -> stop. */
 export function primaryAction(state: {
   hasContent: boolean;
   running: boolean;
   sending: boolean;
 }): PrimaryAction {
-  if (state.hasContent) {
+  if (state.hasContent || state.sending) {
     return "send";
   }
-  if (state.running || state.sending) {
+  if (state.running) {
     return "stop";
   }
   return "none";

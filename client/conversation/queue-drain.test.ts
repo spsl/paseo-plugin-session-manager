@@ -235,6 +235,28 @@ describe("queue drain", () => {
     expect(queue.queueFor("s7")).toHaveLength(0);
   });
 
+  it("drains queued images as bare {data, mimeType} pairs", async () => {
+    const { handle, paseo } = setup();
+    const queue = await import("./queue");
+    const drain = await import("./queue-drain");
+    const image = {
+      id: "i1",
+      mimeType: "image/png",
+      data: "QUJD",
+      uri: "data:image/png;base64,QUJD",
+    };
+    queue.enqueueMessage("s9", { text: "x", images: [image] });
+    drain.ensureQueueDrain(paseo as never);
+    await tick(10);
+
+    drain.nudgeQueueDrain("s9");
+    await tick(10);
+    expect(handle.send).toHaveBeenCalledWith("x", {
+      activeTurnBehavior: "steer",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+    });
+  });
+
   it("releases the observation once every queue is empty", async () => {
     const { handle, paseo } = setup();
     const queue = await import("./queue");

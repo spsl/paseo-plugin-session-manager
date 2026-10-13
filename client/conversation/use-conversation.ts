@@ -76,7 +76,7 @@ function readAgent(handle: AgentHandle): AgentInfo {
     pending,
     provider: snap?.provider ?? null,
     model: snap?.model ?? null,
-    thinkingOptionId: snap?.thinkingOptionId ?? snap?.effectiveThinkingOptionId ?? null,
+    thinkingOptionId: snap?.thinkingOptionId ?? null,
     currentModeId: snap?.currentModeId ?? null,
     modes: (snap?.availableModes ?? []).map(function toMode(mode) {
       return { id: mode.id, label: mode.label, icon: mode.icon };

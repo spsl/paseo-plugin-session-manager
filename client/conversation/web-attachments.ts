@@ -324,3 +324,30 @@ export function autofocusInput(node: DomNode | null): () => void {
 export function focusInput(node: DomNode | null): void {
   node?.focus?.();
 }
+
+type DomKeyEvent = {
+  key?: string;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  preventDefault?: () => void;
+};
+
+/** Cmd/Ctrl+L focuses the composer input (document-level, web only). */
+export function attachFocusShortcut(node: DomNode | null): () => void {
+  const target = dom().document as (DomNode & { activeElement?: unknown }) | undefined;
+  if (node === null || target === undefined || typeof target.addEventListener !== "function") {
+    return function noop() {};
+  }
+  const input = node;
+  function onKeydown(event: unknown): void {
+    const e = event as DomKeyEvent;
+    if ((e.metaKey === true || e.ctrlKey === true) && (e.key === "l" || e.key === "L")) {
+      e.preventDefault?.();
+      input.focus?.();
+    }
+  }
+  target.addEventListener("keydown", onKeydown);
+  return function detach() {
+    target.removeEventListener?.("keydown", onKeydown);
+  };
+}

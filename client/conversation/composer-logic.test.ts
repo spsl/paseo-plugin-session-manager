@@ -90,8 +90,8 @@ describe("primaryAction", () => {
     expect(primaryAction({ hasContent: true, running: true, sending: false })).toBe("send");
     expect(primaryAction({ hasContent: false, running: true, sending: false })).toBe("stop");
     expect(primaryAction({ hasContent: false, running: false, sending: false })).toBe("none");
-    // sending counts as running
-    expect(primaryAction({ hasContent: false, running: false, sending: true })).toBe("stop");
+    // sending shows the send-slot spinner, not the stop button
+    expect(primaryAction({ hasContent: false, running: false, sending: true })).toBe("send");
     expect(primaryAction({ hasContent: true, running: false, sending: true })).toBe("send");
   });
 });
@@ -341,6 +341,51 @@ describe("createComposerSubmitter", () => {
     releaseRef.fn?.();
     expect(await first).toBe("sent");
     expect(effects.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends images as bare {data, mimeType} pairs", async () => {
+    const effects = makeEffects();
+    const submitter = createComposerSubmitter(effects);
+    const image = {
+      id: "i1",
+      mimeType: "image/png",
+      data: "QUJD",
+      uri: "data:image/png;base64,QUJD",
+    };
+    const outcome = await submitter.submit({
+      kind: "default",
+      running: false,
+      hasPendingPermission: false,
+      behavior: "steer",
+      text: "图",
+      images: [image],
+    });
+    expect(outcome).toBe("sent");
+    expect(effects.sendMessage).toHaveBeenCalledWith("图", {
+      activeTurnBehavior: "steer",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+    });
+  });
+
+  it("sendNow sends images as bare {data, mimeType} pairs", async () => {
+    const effects = makeEffects();
+    const submitter = createComposerSubmitter(effects);
+    const image = {
+      id: "i1",
+      mimeType: "image/png",
+      data: "QUJD",
+      uri: "data:image/png;base64,QUJD",
+    };
+    const outcome = await submitter.sendNow({
+      text: "排队项",
+      images: [image],
+      activeTurnBehavior: "interrupt",
+    });
+    expect(outcome).toBe("sent");
+    expect(effects.sendMessage).toHaveBeenCalledWith("排队项", {
+      activeTurnBehavior: "interrupt",
+      images: [{ data: "QUJD", mimeType: "image/png" }],
+    });
   });
 
   it("sendNow shares the same in-flight guard", async () => {

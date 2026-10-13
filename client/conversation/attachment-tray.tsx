@@ -14,7 +14,7 @@ export function AttachmentTray(props: {
 }) {
   const { palette } = props;
   return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, paddingTop: 8, paddingLeft: 8 }}>
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 8, paddingLeft: 8 }}>
       {props.images.map(function renderImage(image) {
         return (
           <View key={image.id} style={{ width: 48, height: 48 }}>
@@ -44,8 +44,6 @@ export function AttachmentTray(props: {
                 alignItems: "center",
                 justifyContent: "center",
                 backgroundColor: palette.surface2,
-                borderWidth: 1,
-                borderColor: palette.border,
               }}
             >
               <Icon name="X" size={12} color={palette.foregroundMuted} />

@@ -37,6 +37,7 @@ import {
 } from "./composer-logic";
 import { cachedDraft, useComposerDraft } from "./drafts";
 import { isNearBottom } from "./model";
+import { modelCatalogFor } from "./model-catalog";
 import { readPaseoSendBehavior } from "../paseo-app-settings";
 import {
   enqueueMessage,
@@ -331,25 +332,17 @@ export function ConversationPane(props: {
         return undefined;
       }
       let dead = false;
-      paseo.providers
-        .listModels(provider)
-        .then(function got(result) {
-          if (dead) {
-            return;
-          }
-          const entry =
-            result.models?.find(function byId(candidate) {
-              return candidate.id === model;
-            }) ?? null;
-          setModelLabel(entry?.label ?? model);
-          setThinkingOptions(entry?.thinkingOptions ?? null);
-        })
-        .catch(function failed() {
-          if (!dead) {
-            setModelLabel(model);
-            setThinkingOptions(null);
-          }
-        });
+      void modelCatalogFor(paseo, provider).then(function got(models) {
+        if (dead) {
+          return;
+        }
+        const entry =
+          models?.find(function byId(candidate) {
+            return candidate.id === model;
+          }) ?? null;
+        setModelLabel(entry?.label ?? model);
+        setThinkingOptions(entry?.thinkingOptions ?? null);
+      });
       return function drop() {
         dead = true;
       };
@@ -410,6 +403,12 @@ export function ConversationPane(props: {
 
   const pending = visiblePermissions(agent.pending, answered);
   const running = agent.running;
+  // Re-read per render: the composer label and send decisions share the same
+  // resolved behavior ("queue" degrades while a permission is pending).
+  const sendBehavior = resolveActiveSendBehavior(
+    readPaseoSendBehavior(),
+    agent.pending.length > 0,
+  );
 
   let content;
   if (conversation.loading) {
@@ -543,6 +542,7 @@ export function ConversationPane(props: {
             running={running}
             sending={sending}
             stopping={stopping}
+            sendBehavior={sendBehavior}
             sendError={sendError}
             queued={queued}
             onEditQueued={editQueued}
