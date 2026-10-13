@@ -306,7 +306,12 @@ function OverlayBody(props: {
     </ScrollView>
   );
   const conversation = (
-    <ConversationPane sessionId={session.id} theme={theme} live={active} compact={compact} />
+    <ConversationPane
+      sessionId={session.id}
+      theme={theme}
+      liveness={session.liveness}
+      compact={compact}
+    />
   );
 
   if (compact) {

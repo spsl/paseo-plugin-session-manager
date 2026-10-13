@@ -96,6 +96,20 @@ export const stopAgentRpc = defineRpc({
   output: MutationOutput,
 });
 
+/** Switch the agent's mode via `paseo agent mode` (SDK has no setter). */
+export const setAgentModeRpc = defineRpc({
+  name: "session-manager.agent.set_mode",
+  input: z.object({ sessionId: z.string(), modeId: z.string().min(1).max(64) }),
+  output: MutationOutput,
+});
+
+/** Switch the agent's thinking option via `paseo agent update --thinking`. */
+export const setAgentThinkingRpc = defineRpc({
+  name: "session-manager.agent.set_thinking",
+  input: z.object({ sessionId: z.string(), thinkingOptionId: z.string().min(1).max(64) }),
+  output: MutationOutput,
+});
+
 /** The persisted composer draft of one session; `null` when none was saved. */
 export const draftGetRpc = defineRpc({
   name: "session-manager.draft.get",

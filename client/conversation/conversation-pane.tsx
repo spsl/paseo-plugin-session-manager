@@ -1,9 +1,9 @@
-/** Live conversation of one agent: timeline, pending permissions, composer, stop. */
+/** Live conversation of one agent: timeline, pending permissions, composer. */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
-import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
+import { usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { useToast } from "@getpaseo/plugin/client/react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Keyboard,
@@ -16,46 +16,66 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
-import { stopAgentRpc } from "../../shared/rpc";
+import {
+  setAgentModeRpc,
+  setAgentThinkingRpc,
+  stopAgentRpc,
+} from "../../shared/rpc";
+import type { Liveness } from "../../shared/types";
 import { errorText } from "../styles";
 import { SNAPSHOT_QUERY_KEY } from "../use-snapshot";
-import { Composer, type SendMode } from "./composer";
-import { useComposerDraft } from "./drafts";
+import { Composer } from "./composer";
+import type { ComposerImage } from "./composer-images";
+import {
+  buildSlashEntries,
+  createComposerSubmitter,
+  resolveActiveSendBehavior,
+  restoredDraft,
+  turnBehaviorFor,
+  type SlashCommandEntry,
+  type SubmitKind,
+} from "./composer-logic";
+import { cachedDraft, useComposerDraft } from "./drafts";
 import { isNearBottom } from "./model";
+import { readPaseoSendBehavior } from "../paseo-app-settings";
 import {
   enqueueMessage,
-  popQueuedMessage,
-  queueFor,
-  removeQueuedMessage,
+  requeueFront,
+  takeQueuedMessage,
   useQueuedMessages,
   type QueuedMessage,
 } from "./queue";
+import { ensureQueueDrain, markQueuedWhileRunning, nudgeQueueDrain } from "./queue-drain";
 import { PermissionCards } from "./permission-cards";
 import { responseFor, visiblePermissions, type PermissionChoice } from "./permissions";
 import { RowView } from "./rows";
 import { useConversation } from "./use-conversation";
 
-/** Sessions whose queue is draining; module-level so a reopened pane never sends twice. */
-const flushingSessions = new Set<string>();
-
 export function ConversationPane(props: {
   sessionId: string;
   theme: PluginTheme;
-  live: boolean;
+  liveness: Liveness;
   compact: boolean;
 }) {
-  const { sessionId, theme, live, compact } = props;
+  const { sessionId, theme, liveness, compact } = props;
   const { colors } = theme;
   const toast = useToast();
   const queryClient = useQueryClient();
+  const paseo = usePaseo();
   const stopCall = useRpc(stopAgentRpc);
+  const setModeCall = useRpc(setAgentModeRpc);
+  const setThinkingCall = useRpc(setAgentThinkingRpc);
   const conversation = useConversation(sessionId);
   const { handle, state, agent } = conversation;
 
   const { draft, setDraft } = useComposerDraft(sessionId);
+  const [images, setImages] = useState<readonly ComposerImage[]>([]);
   const queued = useQueuedMessages(sessionId);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [modePending, setModePending] = useState(false);
+  const [thinkingPending, setThinkingPending] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [stuck, setStuck] = useState(true);
@@ -70,6 +90,33 @@ export function ConversationPane(props: {
     [queryClient],
   );
 
+  // The submit pipeline is pure logic + injected effects; its `held` flag is
+  // the synchronous double-submit guard (submittingRef semantics).
+  const submitter = useMemo(
+    function create() {
+      return createComposerSubmitter({
+        clearInput() {
+          setDraft("");
+          setImages([]);
+        },
+        queueMessage(input) {
+          enqueueMessage(sessionId, input);
+          ensureQueueDrain(paseo);
+          markQueuedWhileRunning(sessionId);
+        },
+        sendMessage(text, options) {
+          return handle.send(text, options);
+        },
+        archive() {
+          return handle.archive().then(function done() {
+            return undefined;
+          });
+        },
+      });
+    },
+    [handle, paseo, sessionId, setDraft],
+  );
+
   // A successful tail load also resumes a dormant agent daemon-side; one board
   // invalidation flips the card back to live without waiting for the next poll.
   const loadNotified = useRef(false);
@@ -80,9 +127,38 @@ export function ConversationPane(props: {
       }
       loadNotified.current = true;
       void invalidateBoard();
+      // "synced-idle" trigger: the timeline just loaded; if the agent is idle
+      // the drain sends the queue head (its own pre-send recheck applies).
+      nudgeQueueDrain(sessionId);
     },
-    [conversation.loading, conversation.error, invalidateBoard],
+    [conversation.loading, conversation.error, invalidateBoard, sessionId],
   );
+
+  // The drain observation only runs while a queue is non-empty; opening a
+  // pane with an existing queue still has to arm it (e.g. after a reload).
+  useEffect(
+    function armDrain() {
+      ensureQueueDrain(paseo);
+    },
+    [paseo],
+  );
+
+  // Lift the composer by the real keyboard height; on hosts without a
+  // software keyboard these events simply never fire.
+  useEffect(function watchKeyboard() {
+    const showEvent = Platform.OS === "android" ? "keyboardDidShow" : "keyboardWillShow";
+    const hideEvent = Platform.OS === "android" ? "keyboardDidHide" : "keyboardWillHide";
+    const show = Keyboard.addListener(showEvent, function onShow(event: KeyboardEvent) {
+      setKeyboardInset(event.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener(hideEvent, function onHide() {
+      setKeyboardInset(0);
+    });
+    return function off() {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   function onScroll(event: NativeSyntheticEvent<NativeScrollEvent>): void {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -109,107 +185,77 @@ export function ConversationPane(props: {
     scrollRef.current?.scrollToEnd({ animated: true });
   }
 
-  async function send(mode: SendMode): Promise<void> {
-    const text = draft.trim();
-    if (text === "" || sending) {
+  async function submit(kind: SubmitKind): Promise<void> {
+    if (liveness === "archived") {
       return;
     }
-    if (mode === "queue") {
-      enqueueMessage(sessionId, text);
-      setDraft("");
-      return;
-    }
+    const failed = { text: draft, images };
+    setSendError(null);
     setSending(true);
     try {
-      if (mode === "send") {
-        await handle.send(text);
-      } else {
-        await handle.send(text, { activeTurnBehavior: mode });
+      const outcome = await submitter.submit({
+        kind,
+        running: agent.running,
+        hasPendingPermission: agent.pending.length > 0,
+        behavior: readPaseoSendBehavior(),
+        text: draft,
+        images,
+      });
+      if (outcome === "sent") {
+        jumpToBottom();
+        await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
+      } else if (outcome === "archived") {
+        await invalidateBoard();
       }
-      setDraft("");
-      jumpToBottom();
-      await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
-    } catch (error) {
-      toast.error(`发送失败：${errorText(error)}`);
+    } catch {
+      setDraft(restoredDraft(cachedDraft(sessionId) ?? "", failed.text));
+      setImages(function restore(current) {
+        return current.length === 0 ? failed.images : [...failed.images, ...current];
+      });
+      setSendError("发送消息失败");
     } finally {
       setSending(false);
     }
   }
 
-  // Queued messages go out in order once the agent's turn ends (or is absent).
-  const running = agent.running;
-  const runningRef = useRef(running);
-  runningRef.current = running;
-  const refreshRef = useRef(conversation.refreshAgent);
-  refreshRef.current = conversation.refreshAgent;
-  useEffect(
-    function flushQueue() {
-      if (running || flushingSessions.has(sessionId) || queueFor(sessionId).length === 0) {
-        return;
-      }
-      flushingSessions.add(sessionId);
-      const drain = async function drain(): Promise<void> {
-        try {
-          for (;;) {
-            if (runningRef.current) {
-              return;
-            }
-            const next = queueFor(sessionId)[0];
-            if (!next) {
-              return;
-            }
-            await handle.send(next.text);
-            removeQueuedMessage(sessionId, next.id);
-            if (queueFor(sessionId).length === 0) {
-              return;
-            }
-            // The daemon interrupts a running turn by default, so the next
-            // message waits for this one's turn; permission, error or timeout
-            // leaves the rest queued until the agent is idle again.
-            const finished = await handle.waitForFinish();
-            if (finished.status !== "idle") {
-              return;
-            }
-          }
-        } catch (error) {
-          toast.error(`排队消息发送失败：${errorText(error)}`);
-        } finally {
-          flushingSessions.delete(sessionId);
-          void refreshRef.current();
-          void invalidateBoard();
-        }
-      };
-      void drain();
-    },
-    [running, sessionId, handle, toast, invalidateBoard],
-  );
-
-  // Lift the composer by the real keyboard height; on hosts without a
-  // software keyboard these events simply never fire.
-  useEffect(function watchKeyboard() {
-    const showEvent = Platform.OS === "android" ? "keyboardDidShow" : "keyboardWillShow";
-    const hideEvent = Platform.OS === "android" ? "keyboardDidHide" : "keyboardWillHide";
-    const show = Keyboard.addListener(showEvent, function onShow(event: KeyboardEvent) {
-      setKeyboardInset(event.endCoordinates.height);
-    });
-    const hide = Keyboard.addListener(hideEvent, function onHide() {
-      setKeyboardInset(0);
-    });
-    return function off() {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-
   function editQueued(message: QueuedMessage): void {
-    const text = popQueuedMessage(sessionId, message.id);
-    if (text !== null) {
-      setDraft(draft.trim() === "" ? text : `${draft}\n${text}`);
+    const taken = takeQueuedMessage(sessionId, message.id);
+    if (taken === null) {
+      return;
     }
+    // Edit replaces the current draft entirely, like Paseo.
+    setDraft(taken.text);
+    setImages([...taken.images]);
   }
 
-  function dropQueued(message: QueuedMessage): void {
-    removeQueuedMessage(sessionId, message.id);
+  async function sendQueuedNow(message: QueuedMessage): Promise<void> {
+    const taken = takeQueuedMessage(sessionId, message.id);
+    if (taken === null) {
+      return;
+    }
+    setSendError(null);
+    setSending(true);
+    try {
+      const behavior = turnBehaviorFor(
+        resolveActiveSendBehavior(readPaseoSendBehavior(), agent.pending.length > 0),
+      );
+      const outcome = await submitter.sendNow({
+        text: taken.text,
+        images: taken.images,
+        activeTurnBehavior: behavior,
+      });
+      if (outcome === "none") {
+        requeueFront(sessionId, taken);
+        return;
+      }
+      jumpToBottom();
+      await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
+    } catch {
+      requeueFront(sessionId, taken);
+      setSendError("发送消息失败");
+    } finally {
+      setSending(false);
+    }
   }
 
   async function stop(): Promise<void> {
@@ -247,7 +293,123 @@ export function ConversationPane(props: {
     }
   }
 
+  // Slash commands: fetched lazily the first time the draft has an active
+  // "/"; the result is cached for the lifetime of this pane.
+  const [slashCommands, setSlashCommands] = useState<readonly SlashCommandEntry[] | null>(null);
+  const slashRequested = useRef(false);
+  const onSlashNeeded = useCallback(
+    function onSlashNeeded(): void {
+      if (slashRequested.current || liveness === "archived") {
+        return;
+      }
+      slashRequested.current = true;
+      handle
+        .commands()
+        .then(function loaded(result) {
+          setSlashCommands(buildSlashEntries(result));
+        })
+        .catch(function failed() {
+          setSlashCommands(null);
+        });
+    },
+    [handle, liveness],
+  );
+
+  // Model label + thinking options come from providers.listModels; the raw
+  // model id is shown when the catalog cannot be read.
+  const [modelLabel, setModelLabel] = useState<string | null>(null);
+  const [thinkingOptions, setThinkingOptions] = useState<
+    readonly { id: string; label: string }[] | null
+  >(null);
+  const provider = agent.provider;
+  const model = agent.model;
+  useEffect(
+    function loadModel() {
+      if (provider === null || model === null) {
+        setModelLabel(null);
+        setThinkingOptions(null);
+        return undefined;
+      }
+      let dead = false;
+      paseo.providers
+        .listModels(provider)
+        .then(function got(result) {
+          if (dead) {
+            return;
+          }
+          const entry =
+            result.models?.find(function byId(candidate) {
+              return candidate.id === model;
+            }) ?? null;
+          setModelLabel(entry?.label ?? model);
+          setThinkingOptions(entry?.thinkingOptions ?? null);
+        })
+        .catch(function failed() {
+          if (!dead) {
+            setModelLabel(model);
+            setThinkingOptions(null);
+          }
+        });
+      return function drop() {
+        dead = true;
+      };
+    },
+    [paseo, provider, model],
+  );
+
+  async function selectMode(modeId: string): Promise<void> {
+    if (modePending) {
+      return;
+    }
+    setModePending(true);
+    try {
+      const result = await setModeCall({ sessionId, modeId });
+      if (!result.ok) {
+        toast.error(`设置模式失败：${result.reason ?? "未知原因"}`);
+        return;
+      }
+      await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
+    } catch (error) {
+      toast.error(`设置模式失败：${errorText(error)}`);
+    } finally {
+      setModePending(false);
+    }
+  }
+
+  async function selectThinking(thinkingOptionId: string): Promise<void> {
+    if (thinkingPending) {
+      return;
+    }
+    setThinkingPending(true);
+    try {
+      const result = await setThinkingCall({ sessionId, thinkingOptionId });
+      if (!result.ok) {
+        toast.error(`设置思考档位失败：${result.reason ?? "未知原因"}`);
+        return;
+      }
+      await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
+    } catch (error) {
+      toast.error(`设置思考档位失败：${errorText(error)}`);
+    } finally {
+      setThinkingPending(false);
+    }
+  }
+
+  const onAddImages = useCallback(function onAddImages(additions: ComposerImage[]): void {
+    setImages(function append(current) {
+      return [...current, ...additions];
+    });
+  }, []);
+  const onRemoveImage = useCallback(function onRemoveImage(id: string): void {
+    setImages(function remove(current) {
+      return current.filter(function keep(image) {
+        return image.id !== id;
+      });
+    });
+  }, []);
+
   const pending = visiblePermissions(agent.pending, answered);
+  const running = agent.running;
 
   let content;
   if (conversation.loading) {
@@ -323,31 +485,6 @@ export function ConversationPane(props: {
         <Text style={{ flex: 1, color: colors.foreground, fontSize: 13, fontWeight: "600" }}>
           会话
         </Text>
-        {running ? (
-          <Pressable
-            accessibilityRole="button"
-            disabled={stopping}
-            onPress={function onStop() {
-              void stop();
-            }}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 4,
-              paddingHorizontal: 10,
-              paddingVertical: 5,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: colors.statusDanger,
-              opacity: stopping ? 0.5 : 1,
-            }}
-          >
-            <Icon name="Square" size={12} color={colors.statusDanger} />
-            <Text style={{ color: colors.statusDanger, fontSize: 12 }}>
-              {stopping ? "停止中…" : "停止"}
-            </Text>
-          </Pressable>
-        ) : null}
       </View>
 
       <View style={{ flex: 1, minHeight: 0 }}>
@@ -384,37 +521,70 @@ export function ConversationPane(props: {
         ) : null}
       </View>
 
-      <View
-        style={{
-          gap: 8,
-          padding: 12,
-          paddingBottom: 12 + keyboardInset,
-          borderTopWidth: 1,
-          borderTopColor: colors.border,
-        }}
-      >
-        <PermissionCards
-          theme={theme}
-          requests={pending}
-          busy={answering}
-          onChoose={function onChoose(requestId, choice) {
-            void choose(requestId, choice);
-          }}
-        />
-        <Composer
-          theme={theme}
-          value={draft}
-          onChange={setDraft}
-          live={live}
-          running={running}
-          sending={sending}
-          queued={queued}
-          onSend={function onSend(mode) {
-            void send(mode);
-          }}
-          onEditQueued={editQueued}
-          onRemoveQueued={dropQueued}
-        />
+      <View style={{ paddingHorizontal: 16, paddingTop: 0, paddingBottom: 16 + keyboardInset }}>
+        <View style={{ width: "100%", maxWidth: 820, alignSelf: "center", gap: 12 }}>
+          <PermissionCards
+            theme={theme}
+            requests={pending}
+            busy={answering}
+            onChoose={function onChoose(requestId, choice) {
+              void choose(requestId, choice);
+            }}
+          />
+          <Composer
+            theme={theme}
+            liveness={liveness}
+            compact={compact}
+            value={draft}
+            onChange={setDraft}
+            images={images}
+            onAddImages={onAddImages}
+            onRemoveImage={onRemoveImage}
+            running={running}
+            sending={sending}
+            stopping={stopping}
+            sendError={sendError}
+            queued={queued}
+            onEditQueued={editQueued}
+            onSendQueuedNow={function sendNow(message) {
+              void sendQueuedNow(message);
+            }}
+            onSubmit={function onSubmit(kind) {
+              void submit(kind);
+            }}
+            onStop={function onStop() {
+              void stop();
+            }}
+            slashCommands={slashCommands}
+            onSlashNeeded={onSlashNeeded}
+            modelLabel={modelLabel}
+            thinking={
+              thinkingOptions !== null && thinkingOptions.length > 0
+                ? {
+                    options: thinkingOptions,
+                    currentId: agent.thinkingOptionId,
+                    pending: thinkingPending,
+                    onSelect(id) {
+                      void selectThinking(id);
+                    },
+                  }
+                : null
+            }
+            modes={
+              agent.modes.length > 0
+                ? {
+                    list: agent.modes,
+                    currentId: agent.currentModeId,
+                    pending: modePending,
+                    onSelect(id) {
+                      void selectMode(id);
+                    },
+                  }
+                : null
+            }
+            usage={agent.usage}
+          />
+        </View>
       </View>
     </View>
   );

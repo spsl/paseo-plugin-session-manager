@@ -1,57 +1,85 @@
 /**
- * Per-session composer queue: messages typed while the agent is mid-turn wait
- * here and are sent one by one once the turn ends. Module-level so the queue
- * survives closing and reopening the session pane; it is client-side only, so
- * a restart drops it.
- * Synchronous listeners only (Hermes); no async arrows.
+ * Per-session composer queue. Entries are delivered one at a time by the
+ * queue drain (sendNext) once the agent transitions to idle — there is no
+ * "delete" entry point, only edit (take + put back into the draft) and
+ * immediate send (take + send), mirroring Paseo.
  */
 import { useSyncExternalStore } from "react";
+import type { ComposerImage } from "./composer-images";
 
-export type QueuedMessage = { id: string; text: string };
+export type QueuedMessage = {
+  id: string;
+  text: string;
+  images: readonly ComposerImage[];
+};
 
 const queues = new Map<string, QueuedMessage[]>();
 const listeners = new Set<(sessionId: string) => void>();
-let counter = 0;
 const EMPTY: readonly QueuedMessage[] = [];
+let nextId = 1;
 
-function notify(sessionId: string): void {
-  const snapshot = [...listeners];
-  for (const listener of snapshot) {
+function emit(sessionId: string): void {
+  for (const listener of listeners) {
     listener(sessionId);
   }
+}
+
+export function enqueueMessage(
+  sessionId: string,
+  input: { text: string; images: readonly ComposerImage[] },
+): QueuedMessage {
+  const message: QueuedMessage = { id: `q${nextId++}`, text: input.text, images: input.images };
+  const list = queues.get(sessionId);
+  if (list) {
+    list.push(message);
+  } else {
+    queues.set(sessionId, [message]);
+  }
+  emit(sessionId);
+  return message;
+}
+
+/** Removes and returns the entry, or null when it no longer exists. */
+export function takeQueuedMessage(sessionId: string, id: string): QueuedMessage | null {
+  const list = queues.get(sessionId);
+  if (!list) {
+    return null;
+  }
+  const index = list.findIndex(function byId(m) {
+    return m.id === id;
+  });
+  if (index < 0) {
+    return null;
+  }
+  const [message] = list.splice(index, 1);
+  emit(sessionId);
+  return message;
+}
+
+/** Puts a message back at the head after a failed send attempt. */
+export function requeueFront(sessionId: string, message: QueuedMessage): void {
+  const list = queues.get(sessionId);
+  if (list) {
+    list.unshift(message);
+  } else {
+    queues.set(sessionId, [message]);
+  }
+  emit(sessionId);
 }
 
 export function queueFor(sessionId: string): readonly QueuedMessage[] {
   return queues.get(sessionId) ?? EMPTY;
 }
 
-export function enqueueMessage(sessionId: string, text: string): QueuedMessage {
-  counter += 1;
-  const message: QueuedMessage = { id: `q${counter}`, text };
-  queues.set(sessionId, [...queueFor(sessionId), message]);
-  notify(sessionId);
-  return message;
-}
-
-export function removeQueuedMessage(sessionId: string, id: string): QueuedMessage | null {
-  const queue = queueFor(sessionId);
-  const index = queue.findIndex(function match(message) {
-    return message.id === id;
-  });
-  if (index < 0) {
-    return null;
+/** Session ids holding at least one queued entry (drain watches these). */
+export function queuedSessionIds(): string[] {
+  const ids: string[] = [];
+  for (const [id, list] of queues) {
+    if (list.length > 0) {
+      ids.push(id);
+    }
   }
-  const next = queue.slice();
-  const removed = next.splice(index, 1)[0] ?? null;
-  queues.set(sessionId, next);
-  notify(sessionId);
-  return removed;
-}
-
-/** Moves a queued message back into the draft for editing. */
-export function popQueuedMessage(sessionId: string, id: string): string | null {
-  const removed = removeQueuedMessage(sessionId, id);
-  return removed === null ? null : removed.text;
+  return ids;
 }
 
 export function subscribeQueue(listener: (sessionId: string) => void): () => void {
@@ -62,16 +90,7 @@ export function subscribeQueue(listener: (sessionId: string) => void): () => voi
 }
 
 export function useQueuedMessages(sessionId: string): readonly QueuedMessage[] {
-  return useSyncExternalStore(
-    function subscribe(onStoreChange: () => void) {
-      return subscribeQueue(function onQueue(changedId) {
-        if (changedId === sessionId) {
-          onStoreChange();
-        }
-      });
-    },
-    function snapshot() {
-      return queueFor(sessionId);
-    },
-  );
+  return useSyncExternalStore(subscribeQueue, function getSnapshot() {
+    return queueFor(sessionId);
+  });
 }

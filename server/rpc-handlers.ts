@@ -15,6 +15,8 @@ import {
   resumeRpc,
   dismissResumeRpc,
   piModelsRpc,
+  setAgentModeRpc,
+  setAgentThinkingRpc,
   setManualStatusRpc,
   snapshotRpc,
   speechRenderRpc,
@@ -22,6 +24,7 @@ import {
   stopAgentRpc,
   testAnalyzerRpc,
 } from "../shared/rpc";
+import { setAgentModeViaCli, setAgentThinkingViaCli } from "./agent-cli";
 import type { AnnouncementFeed } from "./announcements";
 import type { DraftStore } from "./drafts";
 import { DEFAULT_MAGPIE_BASE_URL } from "./analyzer/magpie";
@@ -108,6 +111,14 @@ export function registerRpcHandlers(
   server.handle(stopAgentRpc, async (input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return stopAgentViaCli(input.sessionId);
+  });
+  server.handle(setAgentModeRpc, async (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return setAgentModeViaCli(input.sessionId, input.modeId);
+  });
+  server.handle(setAgentThinkingRpc, async (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return setAgentThinkingViaCli(input.sessionId, input.thinkingOptionId);
   });
   server.handle(draftGetRpc, async (input) => {
     await drafts.load();

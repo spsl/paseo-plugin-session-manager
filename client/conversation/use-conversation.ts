@@ -26,10 +26,28 @@ export type AgentHandle = ReturnType<PaseoApi["agents"]["ref"]>;
 export type AgentInfo = {
   status: string | null;
   running: boolean;
+  initializing: boolean;
   pending: PermissionRequestLike[];
+  provider: string | null;
+  model: string | null;
+  thinkingOptionId: string | null;
+  currentModeId: string | null;
+  modes: readonly { id: string; label: string; icon?: string }[];
+  usage: { used: number; max: number } | null;
 };
 
-const NO_AGENT: AgentInfo = { status: null, running: false, pending: [] };
+const NO_AGENT: AgentInfo = {
+  status: null,
+  running: false,
+  initializing: false,
+  pending: [],
+  provider: null,
+  model: null,
+  thinkingOptionId: null,
+  currentModeId: null,
+  modes: [],
+  usage: null,
+};
 
 type PageLike = {
   entries?: readonly FetchedEntry[];
@@ -44,10 +62,30 @@ function messageOf(error: unknown): string {
 }
 
 function readAgent(handle: AgentHandle): AgentInfo {
+  const snap = handle.current();
   const status = handle.status ?? null;
   const pending = (handle.pendingPermissions ?? []) as unknown as PermissionRequestLike[];
   const running = status === "running" || handle.activeTurn !== null;
-  return { status, running, pending };
+  const initializing = status === "initializing";
+  const used = snap?.lastUsage?.contextWindowUsedTokens;
+  const max = snap?.lastUsage?.contextWindowMaxTokens;
+  return {
+    status,
+    running,
+    initializing,
+    pending,
+    provider: snap?.provider ?? null,
+    model: snap?.model ?? null,
+    thinkingOptionId: snap?.thinkingOptionId ?? snap?.effectiveThinkingOptionId ?? null,
+    currentModeId: snap?.currentModeId ?? null,
+    modes: (snap?.availableModes ?? []).map(function toMode(mode) {
+      return { id: mode.id, label: mode.label, icon: mode.icon };
+    }),
+    usage:
+      typeof used === "number" && typeof max === "number" && max > 0
+        ? { used, max }
+        : null,
+  };
 }
 
 export type Conversation = {
