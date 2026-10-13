@@ -16,7 +16,7 @@ describe("project filter", () => {
       session("one", "p-orca", "Orca", 1),
       session("two", "p-orca", "Orca", 2),
     ]);
-    expect(filter.options).toEqual([{ key: "p-orca", label: "Orca", openCount: 2, latestUpdatedAt: 2 }]);
+    expect(filter.options).toEqual([{ key: "p-orca", label: "Orca", latestUpdatedAt: 2 }]);
     expect(filter.projectKeyBySessionId.get("one")).toBe("p-orca");
   });
 
@@ -24,8 +24,8 @@ describe("project filter", () => {
     const filter = buildProjectFilter([session("known", "p-a", "api", 1), session("x", null, null, 2)]);
     expect(filter.options).toEqual(
       expect.arrayContaining([
-        { key: "p-a", label: "api", openCount: 1, latestUpdatedAt: 1 },
-        { key: "unknown", label: "未知项目", openCount: 1, latestUpdatedAt: 2 },
+        { key: "p-a", label: "api", latestUpdatedAt: 1 },
+        { key: "unknown", label: "未知项目", latestUpdatedAt: 2 },
       ]),
     );
   });
@@ -35,21 +35,14 @@ describe("project filter", () => {
     expect(filter.options.map(({ label }) => label)).toEqual(["orca · k-local", "orca · k-remote"]);
   });
 
-  it("counts only non-closed sessions and keeps closed-only projects selectable", () => {
+  it("keeps closed-only projects selectable", () => {
     const sessions = [
       session("open", "p-a", "api", 1),
       makeSession({ id: "closed", projectKey: "p-a", projectName: "api", updatedAt: 2, column: "closed" }),
       makeSession({ id: "archived", projectKey: "p-b", projectName: "web", updatedAt: 3, column: "closed" }),
     ];
     const filter = buildProjectFilter(sessions);
-    expect(
-      filter.options.map(function pick(option) {
-        return { key: option.key, openCount: option.openCount };
-      }),
-    ).toEqual([
-      { key: "p-a", openCount: 1 },
-      { key: "p-b", openCount: 0 },
-    ]);
+    expect(filter.options.map(({ key }) => key)).toEqual(["p-a", "p-b"]);
     expect(filterSessionsByProject(sessions, filter.projectKeyBySessionId, new Set(["p-b"]))).toHaveLength(1);
   });
 

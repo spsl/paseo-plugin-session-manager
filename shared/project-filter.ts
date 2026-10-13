@@ -10,8 +10,6 @@ export const UNKNOWN_PROJECT_LABEL = "未知项目";
 export type ProjectFilterOption = {
   key: string;
   label: string;
-  /** Sessions not in the closed column; closed sessions still match the filter. */
-  openCount: number;
   latestUpdatedAt: number;
 };
 
@@ -23,7 +21,6 @@ export type ProjectFilter = {
 type ProjectAccumulator = {
   key: string;
   name: string | null;
-  openCount: number;
   latestUpdatedAt: number;
 };
 
@@ -45,7 +42,11 @@ function compareOptions(left: ProjectFilterOption, right: ProjectFilterOption): 
   );
 }
 
-/** Builds stable, client-local project filters from the latest full snapshot. */
+/**
+ * Builds stable, client-local project filters from the latest full snapshot.
+ * Every session contributes its project key, name and recency — even one that
+ * embeds into a parent's card — so filtering still sees it.
+ */
 export function buildProjectFilter(sessions: readonly SessionView[]): ProjectFilter {
   const projectsByKey = new Map<string, ProjectAccumulator>();
   const projectKeyBySessionId = new Map<string, string>();
@@ -54,14 +55,12 @@ export function buildProjectFilter(sessions: readonly SessionView[]): ProjectFil
     const key = projectKeyOf(session);
     projectKeyBySessionId.set(session.id, key);
     const name = session.projectName?.trim() || null;
-    const open = session.column === "closed" ? 0 : 1;
     const current = projectsByKey.get(key);
     if (current) {
-      current.openCount += open;
       current.latestUpdatedAt = Math.max(current.latestUpdatedAt, session.updatedAt);
       current.name = current.name || name;
     } else {
-      projectsByKey.set(key, { key, name, openCount: open, latestUpdatedAt: session.updatedAt });
+      projectsByKey.set(key, { key, name, latestUpdatedAt: session.updatedAt });
     }
   }
 
@@ -70,7 +69,6 @@ export function buildProjectFilter(sessions: readonly SessionView[]): ProjectFil
     options.push({
       key: project.key,
       label: project.key === UNKNOWN_PROJECT_KEY ? UNKNOWN_PROJECT_LABEL : project.name || UNKNOWN_PROJECT_LABEL,
-      openCount: project.openCount,
       latestUpdatedAt: project.latestUpdatedAt,
     });
   }

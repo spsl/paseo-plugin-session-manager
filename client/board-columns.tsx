@@ -3,7 +3,13 @@ import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { COLUMNS } from "../shared/presentation";
 import type { BoardColumn, SessionView } from "../shared/types";
-import { BOARD_GAP, BOARD_PADDING, columnWidthFor, MIN_COLUMN_WIDTH } from "./board-model";
+import {
+  BOARD_GAP,
+  BOARD_PADDING,
+  columnWidthFor,
+  MIN_COLUMN_WIDTH,
+  type BoardCard,
+} from "./board-model";
 import { SessionCard } from "./session-card";
 import { columnTone } from "./styles";
 
@@ -12,22 +18,29 @@ type ColumnDef = (typeof COLUMNS)[number];
 type CommonProps = {
   theme: PluginTheme;
   now: number;
-  groups: Record<BoardColumn, SessionView[]>;
+  groups: Record<BoardColumn, BoardCard[]>;
+  /** Cards whose sub-agent section is expanded. */
+  expandedIds: ReadonlySet<string>;
+  /** Embedded sub-agent row to highlight; null when none is focused. */
+  focusChildId: string | null;
+  /** Card id hosting focusChildId; only that card receives the highlight prop. */
+  focusHostId: string | null;
   onOpen(session: SessionView): void;
+  onToggleSubagents(parentId: string): void;
   onDefer(session: SessionView): void;
   onResume(session: SessionView): void;
 };
 
 function CardList(props: CommonProps & { column: ColumnDef }) {
   const { theme, column } = props;
-  const sessions = props.groups[column.id];
+  const cards = props.groups[column.id];
   return (
     <ScrollView
       style={{ flex: 1 }}
       nestedScrollEnabled
       contentContainerStyle={{ gap: 8, padding: 8, paddingTop: 0 }}
     >
-      {sessions.length === 0 ? (
+      {cards.length === 0 ? (
         <Text
           style={{
             color: theme.colors.foregroundMuted,
@@ -39,13 +52,20 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
           暂无会话
         </Text>
       ) : (
-        sessions.map(function renderCard(session) {
+        cards.map(function renderCard(card) {
           return (
             <SessionCard
-              key={session.id}
-              session={session}
+              key={card.session.id}
+              session={card.session}
               theme={theme}
               now={props.now}
+              subagents={card.children}
+              detachedParent={card.detachedParent}
+              subagentsExpanded={props.expandedIds.has(card.session.id)}
+              highlightSubagentId={
+                card.session.id === props.focusHostId ? props.focusChildId : null
+              }
+              onToggleSubagents={props.onToggleSubagents}
               onOpen={props.onOpen}
               onDefer={props.onDefer}
               onResume={props.onResume}

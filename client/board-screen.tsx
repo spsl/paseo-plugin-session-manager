@@ -1,6 +1,6 @@
 import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { COLUMNS } from "../shared/presentation";
 import { ANALYZER_SETTINGS, DEFAULT_ANALYZER_SETTINGS } from "../shared/settings";
@@ -14,7 +14,16 @@ import { isDesktop, isFullscreen, setFullscreen } from "./desktop-bridge";
 import { FALLBACK_HINT, NOTICE_NO_WINDOW, openBoardInNewWindow } from "./open-board-window";
 import { useSnapshotNudges } from "./agents-watch";
 import { Chip } from "./badge";
-import { groupByColumn, workspaceKeyOf, workspaceLabelOf } from "./board-model";
+import {
+  expandedCardIds,
+  groupBoardCards,
+  openCardCount,
+  projectCardCounts,
+  reduceExpansion,
+  workspaceKeyOf,
+  workspaceLabelOf,
+  type ExpansionState,
+} from "./board-model";
 import { SingleColumn, WideColumns } from "./board-columns";
 import { DeferMenu } from "./defer-menu";
 import { SessionOverlay } from "./session-overlay";
@@ -32,6 +41,10 @@ export function bindSettingsOpener(open: ((id: string) => void) | null): void {
 }
 
 export const SETTINGS_SCREEN_ID = "session-manager";
+
+function initExpansion(hitChildId: string | null): ExpansionState {
+  return { toggled: new Set<string>(), hitChildId };
+}
 
 function useNow(intervalMs: number): number {
   const [now, setNow] = useState(Date.now());
@@ -65,10 +78,15 @@ export function BoardScreen(props: PluginScreenProps) {
 
   const [openId, setOpenId] = useState<string | null>(params.sessionId ?? null);
   const paramSessionId = params.sessionId ?? null;
+  // A deep-linked session that turns out to be an embedded sub-agent stays a
+  // "hit": its card keeps the hit row expanded and highlighted after the detail
+  // closes, until the next hit or a manual collapse of that card.
+  const [expansion, dispatchExpansion] = useReducer(reduceExpansion, paramSessionId, initExpansion);
   useEffect(
     function syncParam() {
       if (paramSessionId !== null) {
         setOpenId(paramSessionId);
+        dispatchExpansion({ type: "hit", childId: paramSessionId });
       }
     },
     [paramSessionId],
@@ -138,6 +156,14 @@ export function BoardScreen(props: PluginScreenProps) {
     },
     [snapshot.data],
   );
+  // The unfiltered layout is the baseline for global numbers; per-project and
+  // per-workspace counts come from each filtered view's own layout instead.
+  const totalLayout = useMemo(
+    function total() {
+      return groupBoardCards(allSessions, allSessions, now);
+    },
+    [allSessions, now],
+  );
   const filter = useMemo(
     function build() {
       return buildProjectFilter(allSessions);
@@ -181,12 +207,47 @@ export function BoardScreen(props: PluginScreenProps) {
     },
     [allSessions, workspaceKey],
   );
-  const groups = useMemo(
+  // The full snapshot walks the parentAgentId chain; the filtered list decides
+  // which sessions get cards. A sub-agent embeds into its topmost visible
+  // non-closed ancestor, so a card never moves columns because of a child.
+  const boardLayout = useMemo(
     function group() {
-      return groupByColumn(sessions, now);
+      return sessions === allSessions
+        ? totalLayout
+        : groupBoardCards(sessions, allSessions, now);
     },
-    [sessions, now],
+    [sessions, allSessions, totalLayout, now],
   );
+  const groups = boardLayout.groups;
+  // A hit on an embedded child keeps its parent card expanded and its row lit.
+  const focusChildId =
+    expansion.hitChildId !== null && boardLayout.hostByChildId.has(expansion.hitChildId)
+      ? expansion.hitChildId
+      : null;
+  const focusHostId =
+    focusChildId === null ? null : (boardLayout.hostByChildId.get(focusChildId) ?? null);
+  const expandedIds = useMemo(
+    function expand() {
+      return expandedCardIds(expansion.toggled, focusChildId, boardLayout.hostByChildId);
+    },
+    [expansion.toggled, focusChildId, boardLayout],
+  );
+  // dispatch is stable, so reading the latest host map through a ref keeps
+  // this callback referentially stable across snapshot polls and toggles.
+  const hostByChildIdRef = useRef(boardLayout.hostByChildId);
+  useEffect(
+    function syncHost() {
+      hostByChildIdRef.current = boardLayout.hostByChildId;
+    },
+    [boardLayout],
+  );
+  const onToggleSubagents = useCallback(function toggle(parentId: string) {
+    dispatchExpansion({
+      type: "toggle",
+      cardId: parentId,
+      hostByChildId: hostByChildIdRef.current,
+    });
+  }, []);
 
   const actions = useSessionActions();
   const [deferTarget, setDeferTarget] = useState<SessionView | null>(null);
@@ -214,12 +275,31 @@ export function BoardScreen(props: PluginScreenProps) {
     setSelected(next);
   }
 
-  const total = allSessions.length;
-  const openTotal = filter.options.reduce(function sum(total, option) {
-    return total + option.openCount;
-  }, 0);
-  const countLabel =
-    selected.size === 0 ? `${total} 个会话` : `${sessions.length} / ${total} 个会话`;
+  const cardTotal = allSessions.length - totalLayout.hostByChildId.size;
+  const visibleCards = sessions.length - boardLayout.hostByChildId.size;
+  // Each chip counts the open cards of its own single-project view, so a
+  // sub-agent detached by the filter counts toward its project; "全部项目"
+  // uses the unfiltered layout rather than summing chips.
+  const cardCountByProjectKey = useMemo(
+    function counts() {
+      return projectCardCounts(
+        allSessions,
+        filter.projectKeyBySessionId,
+        filter.options.map(function keyOf(option) {
+          return option.key;
+        }),
+        now,
+      );
+    },
+    [allSessions, filter, now],
+  );
+  const openTotal = openCardCount(totalLayout);
+  const filtered = selected.size > 0 || workspaceKey !== null;
+  // N / M is cards vs sessions inside the current view, so N can never exceed
+  // M even when a filter detaches a sub-agent into its own card.
+  const countLabel = filtered
+    ? `${visibleCards} / ${sessions.length} 个会话`
+    : `${cardTotal} 个会话`;
   const problem = snapshot.data?.analyzer.problem ?? null;
 
   let body;
@@ -274,7 +354,11 @@ export function BoardScreen(props: PluginScreenProps) {
           theme={theme}
           now={now}
           groups={groups}
+          expandedIds={expandedIds}
+          focusChildId={focusChildId}
+          focusHostId={focusHostId}
           onOpen={onOpen}
+          onToggleSubagents={onToggleSubagents}
           onDefer={onDefer}
           onResume={onResume}
           columnId={activeColumn}
@@ -287,7 +371,11 @@ export function BoardScreen(props: PluginScreenProps) {
         theme={theme}
         now={now}
         groups={groups}
+        expandedIds={expandedIds}
+        focusChildId={focusChildId}
+        focusHostId={focusHostId}
         onOpen={onOpen}
+        onToggleSubagents={onToggleSubagents}
         onDefer={onDefer}
         onResume={onResume}
         columnWidthPercent={columnWidthPercent}
@@ -405,7 +493,7 @@ export function BoardScreen(props: PluginScreenProps) {
               <Chip
                 key={option.key}
                 theme={theme}
-                label={`${option.label}（${option.openCount}）`}
+                label={`${option.label}（${cardCountByProjectKey.get(option.key) ?? 0}）`}
                 selected={selected.has(option.key)}
                 onPress={function toggle() {
                   toggleProject(option.key);

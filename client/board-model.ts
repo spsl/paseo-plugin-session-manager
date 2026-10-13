@@ -1,5 +1,6 @@
 /** Pure board logic: grouping, polling cadence and optimistic snapshot patches. */
 import { columnForStatus } from "../shared/presentation";
+import { filterSessionsByProject } from "../shared/project-filter";
 import {
   BOARD_COLUMNS,
   isActiveLiveness,
@@ -68,6 +69,351 @@ export function groupByColumn(
   return groups;
 }
 
+/** A card as rendered on the board: a session plus its embedded sub-agents. */
+export type BoardCard = {
+  session: SessionView;
+  /** Sub-agents flattened into this card, newest activity first. */
+  children: readonly SessionView[];
+  /**
+   * Set on a sub-agent that renders as its own card because its parent is
+   * missing from the snapshot, closed, or filtered out; feeds the "父：" link.
+   */
+  detachedParent: SessionView | null;
+};
+
+export type BoardLayout = {
+  groups: Record<BoardColumn, BoardCard[]>;
+  /** Embedded sub-agent id -> the card id hosting it (for auto-expand/highlight). */
+  hostByChildId: ReadonlyMap<string, string>;
+};
+
+/** A session that can host sub-agents: visible on the board and not closed. */
+function isCardHost(
+  session: SessionView,
+  visibleIds: ReadonlySet<string>,
+  now: number,
+): boolean {
+  return visibleIds.has(session.id) && boardColumnOf(session, now) !== "closed";
+}
+
+function byUpdatedAtDesc(left: SessionView, right: SessionView): number {
+  return right.updatedAt - left.updatedAt;
+}
+
+/** Shared empty row list so childless cards keep a stable prop reference. */
+export const EMPTY_SUBAGENTS: readonly SessionView[] = [];
+
+/**
+ * The direct parent shown as the "父：" link on a standalone sub-agent card;
+ * null when the parent is absent from the snapshot or the id self-references.
+ */
+function detachedParentOf(
+  session: SessionView,
+  universeById: ReadonlyMap<string, SessionView>,
+): SessionView | null {
+  const parentId = session.parentAgentId;
+  if (parentId === null || parentId === session.id) {
+    return null;
+  }
+  return universeById.get(parentId) ?? null;
+}
+
+/**
+ * The topmost visible non-closed ancestor of `session`. The parentAgentId
+ * chain is climbed through filtered-out or closed ancestors; stops at a
+ * missing parent or the first repeated id (cycle defense).
+ */
+function topmostHostId(
+  session: SessionView,
+  universeById: ReadonlyMap<string, SessionView>,
+  visibleIds: ReadonlySet<string>,
+  now: number,
+): string | null {
+  let host: string | null = null;
+  const seen = new Set<string>();
+  seen.add(session.id);
+  let current = session;
+  while (current.parentAgentId !== null) {
+    const parent = universeById.get(current.parentAgentId);
+    if (parent === undefined || seen.has(parent.id)) {
+      break;
+    }
+    seen.add(parent.id);
+    if (isCardHost(parent, visibleIds, now)) {
+      host = parent.id;
+    }
+    current = parent;
+  }
+  return host;
+}
+
+/**
+ * Board layout with sub-agents embedded into their topmost visible
+ * non-closed ancestor's card; multi-level nesting flattens onto that card.
+ * A sub-agent renders as its own card (with `detachedParent` for the "父："
+ * link) only when no such ancestor exists. Cyclic ancestry never hangs and
+ * never drops a session: hosts that resolve into each other render standalone.
+ */
+export function groupBoardCards(
+  visible: readonly SessionView[],
+  universe: readonly SessionView[],
+  now: number,
+): BoardLayout {
+  const universeById = new Map<string, SessionView>();
+  for (const session of universe) {
+    universeById.set(session.id, session);
+  }
+  const visibleIds = new Set<string>();
+  const visibleById = new Map<string, SessionView>();
+  for (const session of visible) {
+    visibleIds.add(session.id);
+    visibleById.set(session.id, session);
+  }
+
+  const cardById = new Map<string, BoardCard>();
+  const embedded = new Map<string, string>();
+  for (const session of visible) {
+    const hostId =
+      session.parentAgentId === null
+        ? null
+        : topmostHostId(session, universeById, visibleIds, now);
+    if (hostId === null) {
+      cardById.set(session.id, {
+        session,
+        children: EMPTY_SUBAGENTS,
+        detachedParent: detachedParentOf(session, universeById),
+      });
+    } else {
+      embedded.set(session.id, hostId);
+    }
+  }
+
+  const hostByChildId = new Map<string, string>();
+  const childrenByHost = new Map<string, SessionView[]>();
+  for (const [childId, initialHost] of embedded) {
+    const child = visibleById.get(childId);
+    if (child === undefined) {
+      continue;
+    }
+    // The topmost host is a card unless the ancestry cycles; chase the host
+    // chain to detect that and promote the child to a standalone card.
+    let host: string | null = initialHost;
+    const seen = new Set<string>([childId]);
+    while (host !== null && embedded.has(host)) {
+      if (seen.has(host)) {
+        host = null;
+        break;
+      }
+      seen.add(host);
+      host = embedded.get(host) ?? null;
+    }
+    const card = host === null ? undefined : cardById.get(host);
+    if (host !== null && card !== undefined) {
+      hostByChildId.set(childId, host);
+      const siblings = childrenByHost.get(host);
+      if (siblings === undefined) {
+        childrenByHost.set(host, [child]);
+      } else {
+        siblings.push(child);
+      }
+    } else {
+      cardById.set(child.id, {
+        session: child,
+        children: EMPTY_SUBAGENTS,
+        detachedParent: detachedParentOf(child, universeById),
+      });
+    }
+  }
+
+  for (const [host, siblings] of childrenByHost) {
+    siblings.sort(byUpdatedAtDesc);
+    const card = cardById.get(host);
+    if (card !== undefined) {
+      card.children = siblings;
+    }
+  }
+
+  const cardSessions: SessionView[] = [];
+  for (const card of cardById.values()) {
+    cardSessions.push(card.session);
+  }
+  const sessionGroups = groupByColumn(cardSessions, now);
+  const groups = {} as Record<BoardColumn, BoardCard[]>;
+  for (const column of BOARD_COLUMNS) {
+    const cards: BoardCard[] = [];
+    for (const session of sessionGroups[column]) {
+      const card = cardById.get(session.id);
+      if (card !== undefined) {
+        cards.push(card);
+      }
+    }
+    groups[column] = cards;
+  }
+  return { groups, hostByChildId };
+}
+
+/** Sessions that render their own card, in column order (embedded children excluded). */
+export function cardSessions(layout: BoardLayout): SessionView[] {
+  const sessions: SessionView[] = [];
+  for (const column of BOARD_COLUMNS) {
+    for (const card of layout.groups[column]) {
+      sessions.push(card.session);
+    }
+  }
+  return sessions;
+}
+
+/**
+ * Cards whose sub-agent section renders expanded: manually toggled cards plus
+ * the host of a hit sub-agent (a deep link via sessionId), so the row stays
+ * visible. Used to auto-expand a parent when a hit lands on an embedded child.
+ */
+export function expandedCardIds(
+  toggled: ReadonlySet<string>,
+  focusChildId: string | null,
+  hostByChildId: ReadonlyMap<string, string>,
+): ReadonlySet<string> {
+  if (focusChildId === null) {
+    return toggled;
+  }
+  const host = hostByChildId.get(focusChildId);
+  if (host === undefined) {
+    return toggled;
+  }
+  const next = new Set(toggled);
+  next.add(host);
+  return next;
+}
+
+/** Expansion state for a board: manual toggles plus the live deep-link hit. */
+export type ExpansionState = {
+  /** The manual toggle set. */
+  toggled: ReadonlySet<string>;
+  /** The hit child id; cleared when collapsing the card hosting it. */
+  hitChildId: string | null;
+};
+
+/**
+ * Toggles a card's sub-agent section by what is currently displayed: a card
+ * shown expanded collapses (also dropping a hit that lands inside, since the
+ * hit alone kept it open); a shown-collapsed card expands.
+ */
+export function toggleCardExpansion(
+  displayed: ReadonlySet<string>,
+  toggled: ReadonlySet<string>,
+  hitChildId: string | null,
+  hostByChildId: ReadonlyMap<string, string>,
+  cardId: string,
+): ExpansionState {
+  if (displayed.has(cardId)) {
+    const next = new Set(toggled);
+    next.delete(cardId);
+    const clearsHit = hitChildId !== null && hostByChildId.get(hitChildId) === cardId;
+    return { toggled: next, hitChildId: clearsHit ? null : hitChildId };
+  }
+  const next = new Set(toggled);
+  next.add(cardId);
+  return { toggled: next, hitChildId };
+}
+
+export type ExpansionAction =
+  | { type: "toggle"; cardId: string; hostByChildId: ReadonlyMap<string, string> }
+  | { type: "hit"; childId: string | null };
+
+/** useReducer companion so callers keep a stable dispatch reference. */
+export function reduceExpansion(state: ExpansionState, action: ExpansionAction): ExpansionState {
+  if (action.type === "hit") {
+    return { toggled: state.toggled, hitChildId: action.childId };
+  }
+  const displayed = expandedCardIds(state.toggled, state.hitChildId, action.hostByChildId);
+  return toggleCardExpansion(displayed, state.toggled, state.hitChildId, action.hostByChildId, action.cardId);
+}
+
+export type SubagentStatus = {
+  /** The board column whose tone the status dot and label follow. */
+  column: BoardColumn;
+  label: string;
+  /** Counted in the 需处理 aggregate (waiting, blocked or 待授权). */
+  attention: boolean;
+};
+
+/** Status of an embedded sub-agent row, following the same column semantics as the board. */
+export function subagentStatusOf(session: SessionView, now: number): SubagentStatus {
+  if (!isActiveLiveness(session.liveness)) {
+    return { column: "closed", label: "已关闭", attention: false };
+  }
+  // Deferred children (masked or queued) park as 已延迟, matching the server's
+  // needsAttention = active && !deferred.
+  if (isDeferred(session, now)) {
+    return { column: "deferred", label: "已延迟", attention: false };
+  }
+  const column = boardColumnOf(session, now);
+  if (column === "waiting_for_user" || session.pendingPermissionCount > 0) {
+    return { column: "waiting_for_user", label: "需处理", attention: true };
+  }
+  switch (column) {
+    case "in_progress":
+      return { column, label: "进行中", attention: false };
+    case "completed":
+      return { column, label: "已完成", attention: false };
+    default:
+      return { column: "unclear", label: "未明确", attention: false };
+  }
+}
+
+export type SubagentCounts = {
+  total: number;
+  /** 需处理 (warning tone). */
+  attention: number;
+  /** 进行中 (accent tone). */
+  inProgress: number;
+  /** 已完成 (success tone). */
+  completed: number;
+  /** 未明确 (muted tone). */
+  unclear: number;
+  /** 已延迟 (muted tone). */
+  deferred: number;
+  /** 已关闭 (muted tone). */
+  closed: number;
+};
+
+/** Collapsed-header aggregates for a card's embedded sub-agents. */
+export function countSubagents(children: readonly SessionView[], now: number): SubagentCounts {
+  const counts: SubagentCounts = {
+    total: children.length,
+    attention: 0,
+    inProgress: 0,
+    completed: 0,
+    unclear: 0,
+    deferred: 0,
+    closed: 0,
+  };
+  for (const child of children) {
+    const status = subagentStatusOf(child, now);
+    if (status.attention) {
+      counts.attention += 1;
+      continue;
+    }
+    switch (status.column) {
+      case "in_progress":
+        counts.inProgress += 1;
+        break;
+      case "completed":
+        counts.completed += 1;
+        break;
+      case "deferred":
+        counts.deferred += 1;
+        break;
+      case "closed":
+        counts.closed += 1;
+        break;
+      default:
+        counts.unclear += 1;
+    }
+  }
+  return counts;
+}
+
 export function attentionSessions(
   sessions: readonly SessionView[],
   limit: number,
@@ -109,36 +455,77 @@ export function workspaceLabelOf(session: SessionView): string {
   return parts.length > 0 ? (parts[parts.length - 1] ?? "未关联") : "未关联";
 }
 
+/** Cards outside the closed column — the counting unit for board numbers. */
+export function openCardCount(layout: BoardLayout): number {
+  let count = 0;
+  for (const column of BOARD_COLUMNS) {
+    if (column !== "closed") {
+      count += layout.groups[column].length;
+    }
+  }
+  return count;
+}
+
+/**
+ * Open-card count per project key, each computed from that project's own
+ * view: a sub-agent whose parent sits in another project renders standalone
+ * there and counts toward its own project.
+ */
+export function projectCardCounts(
+  allSessions: readonly SessionView[],
+  projectKeyBySessionId: ReadonlyMap<string, string>,
+  projectKeys: readonly string[],
+  now: number,
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const key of projectKeys) {
+    const visible = filterSessionsByProject(allSessions, projectKeyBySessionId, new Set([key]));
+    counts.set(key, openCardCount(groupBoardCards(visible, allSessions, now)));
+  }
+  return counts;
+}
+
 export type WorkspaceAttentionGroup = {
   key: string;
   label: string;
   attentionCount: number;
 };
 
-/** Workspaces that have sessions needing attention, most urgent first. */
+/**
+ * Workspaces with sessions needing attention, counted from each workspace's
+ * own card view so a sub-agent whose parent sits in another workspace still
+ * counts where it renders standalone. Most urgent first.
+ */
 export function workspaceAttentionGroups(
   sessions: readonly SessionView[],
+  now: number,
 ): WorkspaceAttentionGroup[] {
-  const groups = new Map<string, WorkspaceAttentionGroup & { latest: number }>();
+  const byWorkspace = new Map<string, { label: string; members: SessionView[] }>();
   for (const session of sessions) {
-    if (!session.needsAttention) {
-      continue;
-    }
     const key = workspaceKeyOf(session);
-    const current = groups.get(key);
-    if (current) {
-      current.attentionCount += 1;
-      current.latest = Math.max(current.latest, session.updatedAt);
+    const entry = byWorkspace.get(key);
+    if (entry === undefined) {
+      byWorkspace.set(key, { label: workspaceLabelOf(session), members: [session] });
     } else {
-      groups.set(key, {
-        key,
-        label: workspaceLabelOf(session),
-        attentionCount: 1,
-        latest: session.updatedAt,
-      });
+      entry.members.push(session);
     }
   }
-  return [...groups.values()]
+  const groups: (WorkspaceAttentionGroup & { latest: number })[] = [];
+  for (const [key, entry] of byWorkspace) {
+    const layout = groupBoardCards(entry.members, sessions, now);
+    let attentionCount = 0;
+    let latest = 0;
+    for (const card of cardSessions(layout)) {
+      if (card.needsAttention) {
+        attentionCount += 1;
+        latest = Math.max(latest, card.updatedAt);
+      }
+    }
+    if (attentionCount > 0) {
+      groups.push({ key, label: entry.label, attentionCount, latest });
+    }
+  }
+  return groups
     .sort(function byRecent(left, right) {
       return right.latest - left.latest || left.label.localeCompare(right.label, "zh-CN");
     })

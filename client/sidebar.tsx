@@ -1,10 +1,16 @@
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { firstLine, sessionTitle } from "../shared/presentation";
 import { useSnapshotNudges } from "./agents-watch";
-import { attentionSessions, workspaceAttentionGroups } from "./board-model";
+import {
+  attentionSessions,
+  cardSessions,
+  groupBoardCards,
+  workspaceAttentionGroups,
+} from "./board-model";
 import { toneBackground } from "./styles";
 import { useSnapshot } from "./use-snapshot";
 
@@ -14,10 +20,24 @@ export function BoardSidebarItem({ theme, currentScreen, openScreen, openPopover
   const snapshot = useSnapshot();
   useSnapshotNudges();
   const sessions = snapshot.data?.sessions ?? [];
-  const count = sessions.filter(function needs(session) {
+  // Counts follow cards, not sessions: embedded sub-agents don't add to them.
+  const cards = useMemo(
+    function cards() {
+      return cardSessions(groupBoardCards(sessions, sessions, Date.now()));
+    },
+    [sessions],
+  );
+  const count = cards.filter(function needs(session) {
     return session.needsAttention;
   }).length;
-  const workspaces = workspaceAttentionGroups(sessions).slice(0, 8);
+  // Per-workspace counts use each workspace's own layout: a sub-agent whose
+  // parent sits elsewhere still counts where it renders standalone.
+  const workspaces = useMemo(
+    function groups() {
+      return workspaceAttentionGroups(sessions, Date.now()).slice(0, 8);
+    },
+    [sessions],
+  );
   const warning = theme.colors.statusWarning;
 
   function badge(value: number) {
@@ -85,7 +105,13 @@ export function BoardSidebarItem({ theme, currentScreen, openScreen, openPopover
 function AttentionPopover({ theme, openScreen, close }: PluginPopoverProps) {
   const snapshot = useSnapshot();
   const { colors } = theme;
-  const items = attentionSessions(snapshot.data?.sessions ?? [], 8);
+  const sessions = snapshot.data?.sessions ?? [];
+  const items = useMemo(
+    function items() {
+      return attentionSessions(cardSessions(groupBoardCards(sessions, sessions, Date.now())), 8);
+    },
+    [sessions],
+  );
   return (
     <View style={{ gap: 2 }}>
       <Text style={{ color: colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>
