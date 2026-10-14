@@ -823,6 +823,21 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
               }
             }}
           />
+          <SettingsSelect<string>
+            label="重启后通知团队协调者"
+            hint="Paseo 重启时如果 /dev-team 的子 Agent 正在运行，会向它的协调者发送「继续」消息并列出被中断的子 Agent；协调者处于未连接状态时会先恢复它。"
+            value={values?.teamRecovery ?? "notify"}
+            options={[
+              { label: "通知协调者（默认）", value: "notify" },
+              { label: "不通知", value: "off" },
+            ]}
+            disabled={disabled}
+            onValueChange={function change(value) {
+              if (value === "notify" || value === "off") {
+                void save({ teamRecovery: value });
+              }
+            }}
+          />
           <NumberInput
             label="已关闭会话保留天数"
             initialValue={values?.closedRetentionDays ?? 7}

@@ -84,7 +84,7 @@ export function permissionView(request: PermissionRequestLike): PermissionView {
 }
 
 export type PermissionResponseLike =
-  | { behavior: "allow"; selectedActionId?: string }
+  | { behavior: "allow"; selectedActionId?: string; updatedInput?: Record<string, unknown> }
   | { behavior: "deny"; selectedActionId?: string; message?: string };
 
 export function responseFor(choice: PermissionChoice): PermissionResponseLike {

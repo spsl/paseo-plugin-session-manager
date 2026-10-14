@@ -7,7 +7,10 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
+  DEFER_CLOCK_TARGETS,
   DEFER_DURATIONS,
+  deferClockLabel,
+  deferClockTimestamp,
   formatDeferRemaining,
   formatDeferUntil,
   sessionTitle,
@@ -49,12 +52,15 @@ function DeferMenuBody(props: {
   const { session, theme, now, onClose } = props;
   const { colors } = theme;
   const actions = useSessionActions();
-  const [durationMs, setDurationMs] = useState<number>(DEFER_DURATIONS[1].ms);
+  const [durationMs, setDurationMs] = useState<number>(DEFER_DURATIONS[2].ms);
+  const [clockIndex, setClockIndex] = useState<number | null>(null);
   const [toQueue, setToQueue] = useState(false);
   const deferred = isDeferred(session, now);
 
   function confirm() {
-    void actions.defer(session.id, durationMs, toQueue);
+    const target = clockIndex === null ? null : DEFER_CLOCK_TARGETS[clockIndex];
+    const ms = target ? deferClockTimestamp(target, Date.now()) - Date.now() : durationMs;
+    void actions.defer(session.id, ms, toQueue);
     onClose();
   }
 
@@ -120,9 +126,28 @@ function DeferMenuBody(props: {
                 key={option.ms}
                 theme={theme}
                 label={option.label}
-                selected={durationMs === option.ms}
+                selected={clockIndex === null && durationMs === option.ms}
                 onPress={function pick() {
+                  setClockIndex(null);
                   setDurationMs(option.ms);
+                }}
+              />
+            );
+          })}
+        </View>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+          {DEFER_CLOCK_TARGETS.map(function renderClock(target, index) {
+            if (deferClockTimestamp(target, now) <= now) {
+              return null;
+            }
+            return (
+              <Chip
+                key={index}
+                theme={theme}
+                label={deferClockLabel(target)}
+                selected={clockIndex === index}
+                onPress={function pickClock() {
+                  setClockIndex(index);
                 }}
               />
             );

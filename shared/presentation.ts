@@ -3,7 +3,11 @@
  * `session-observer-presentation.ts`; UI strings are Chinese.
  */
 import {
+  DECLARED_KIND_LABELS,
+  NOW_MAX_LENGTH,
   TITLE_MAX_LENGTH,
+  isActiveLiveness,
+  speechOf,
   type AnalysisState,
   type AnalysisStatus,
   type BoardColumn,
@@ -23,6 +27,7 @@ export const COLUMNS: readonly { id: BoardColumn; label: string; hint: string }[
 
 /** Fixed defer durations offered by the card button and the detail pane. */
 export const DEFER_DURATIONS: readonly { ms: number; label: string }[] = [
+  { ms: 60_000, label: "1 分钟" },
   { ms: 30 * 60_000, label: "30 分钟" },
   { ms: 60 * 60_000, label: "1 小时" },
   { ms: 4 * 60 * 60_000, label: "4 小时" },
@@ -31,6 +36,35 @@ export const DEFER_DURATIONS: readonly { ms: number; label: string }[] = [
   { ms: 2 * 24 * 60 * 60_000, label: "2 天" },
   { ms: 4 * 24 * 60 * 60_000, label: "4 天" },
 ];
+
+const DAY_NAMES = ["今天", "明天", "后天"];
+
+/** Absolute defer targets: day offset from today plus an hour of the day. */
+export const DEFER_CLOCK_TARGETS: readonly { dayOffset: number; hour: number }[] = [
+  { dayOffset: 0, hour: 14 },
+  { dayOffset: 0, hour: 18 },
+  { dayOffset: 1, hour: 9 },
+  { dayOffset: 1, hour: 14 },
+  { dayOffset: 1, hour: 18 },
+  { dayOffset: 2, hour: 9 },
+  { dayOffset: 2, hour: 14 },
+  { dayOffset: 2, hour: 18 },
+];
+
+export function deferClockLabel(target: { dayOffset: number; hour: number }): string {
+  return `至${DAY_NAMES[target.dayOffset]} ${target.hour}:00`;
+}
+
+/** Timestamp of the target's local wall-clock time, relative to `now`. */
+export function deferClockTimestamp(
+  target: { dayOffset: number; hour: number },
+  now: number,
+): number {
+  const date = new Date(now);
+  date.setDate(date.getDate() + target.dayOffset);
+  date.setHours(target.hour, 0, 0, 0);
+  return date.getTime();
+}
 
 export const STATUS_OPTIONS: readonly { status: AnalysisStatus; label: string }[] = [
   { status: "waiting_for_user", label: "需要处理" },
@@ -149,6 +183,91 @@ export function livenessLabel(liveness: Liveness): string {
 /** Shown when a Paseo restart closed the session while it had work in flight. */
 export const RESTART_INTERRUPTED_TEXT = "Paseo 重启时任务被中断";
 
+/** Live agent state read from the open conversation; fresher than the session snapshot. */
+export type LiveState = {
+  running: boolean;
+  pendingPermissions: number;
+  userText: string | null;
+  activity: string | null;
+};
+
+export type NowTone = "working" | "waiting" | "blocked" | "done" | "idle";
+
+/** The 现在 line of the detail pane. */
+export type NowLine = { tone: NowTone; text: string; detail: string | null };
+
+function toneForStatus(status: AnalysisStatus): NowTone {
+  switch (status) {
+    case "in_progress":
+      return "working";
+    case "waiting_for_user":
+      return "waiting";
+    case "blocked":
+      return "blocked";
+    case "completed":
+      return "done";
+    case "unclear":
+      return "idle";
+  }
+}
+
+/**
+ * What the session is doing right now. Live state wins over the analysis,
+ * which only describes the last finished turn.
+ */
+export function nowLine(session: SessionView, live: LiveState | null): NowLine {
+  const analysis = session.analysis;
+  // Older analyses have no `now`; their speech may fall back to the long summary.
+  const said = analysis ? (firstLine(analysis.now) ?? firstLine(speechOf(analysis), 120)) : null;
+  if (!isActiveLiveness(session.liveness)) {
+    return { tone: "idle", text: "会话已关闭", detail: said };
+  }
+  if (session.liveness === "dormant") {
+    return {
+      tone: "waiting",
+      text: session.interruptedAt !== null ? RESTART_INTERRUPTED_TEXT : "Paseo 重启后未连接",
+      detail: "恢复后可继续",
+    };
+  }
+  const pending = live ? live.pendingPermissions : session.pendingPermissionCount;
+  if (pending > 0) {
+    return {
+      tone: "waiting",
+      text: pending > 1 ? `等你授权（${pending} 个请求）` : "等你授权",
+      detail: "在右侧会话里批准或拒绝",
+    };
+  }
+  if (live ? live.running : session.lifecycle === "working") {
+    const ask = firstLine(live?.userText, NOW_MAX_LENGTH);
+    return {
+      tone: "working",
+      text: ask ? `正在处理：${ask}` : "正在运行",
+      detail: live?.activity ? firstLine(live.activity, NOW_MAX_LENGTH) : null,
+    };
+  }
+  if (session.lifecycle === "error") {
+    return { tone: "blocked", text: "Agent 出错", detail: said };
+  }
+  const tone = toneForStatus(session.effectiveStatus);
+  const updating = session.analysisState === "queued" || session.analysisState === "running";
+  if (!analysis) {
+    const declared = session.declared;
+    return {
+      tone,
+      text: declared
+        ? `${DECLARED_KIND_LABELS[declared.kind]}：${declared.text}`
+        : `${analysisStateLabel(session.analysisState)}，暂无分析结论`,
+      detail: null,
+    };
+  }
+  const blocker = tone === "blocked" ? firstLine(analysis.blockers[0], 80) : null;
+  return {
+    tone,
+    text: said ?? "暂无",
+    detail: blocker ? `卡在：${blocker}` : updating ? "分析更新中…" : null,
+  };
+}
+
 /** Badge text for a dormant session's resume progress; null for other liveness. */
 export function resumeStateLabel(
   session: Pick<SessionView, "liveness" | "resumeState">,
@@ -165,6 +284,19 @@ export function resumeStateLabel(
     default:
       return "未连接";
   }
+}
+
+/** Time of a 之前 item: HH:mm today, MM-DD HH:mm otherwise. */
+export function formatStepTime(at: number, now: number): string {
+  const date = new Date(at);
+  const today = new Date(now);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const sameDay =
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate();
+  return sameDay ? clock : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
 }
 
 /** Compact Chinese age label: 刚刚 / N分钟前 / N小时前 / N天前. */

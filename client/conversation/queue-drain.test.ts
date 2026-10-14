@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { steerText } from "./model";
 
 type FakeHandlers = {
   snapshot(): void;
@@ -101,7 +102,7 @@ describe("queue drain", () => {
     handlersBox.handlers?.update({ type: "agent_update" });
     await tick(300);
     expect(handle.send).toHaveBeenCalledTimes(1);
-    expect(handle.send).toHaveBeenCalledWith("一", { activeTurnBehavior: "steer" });
+    expect(handle.send).toHaveBeenCalledWith(steerText("一"), { activeTurnBehavior: "steer" });
     expect(queue.queueFor("s1").map((m) => m.text)).toEqual(["二"]);
   });
 
@@ -253,7 +254,7 @@ describe("queue drain", () => {
 
     drain.nudgeQueueDrain("s9");
     await tick(10);
-    expect(handle.send).toHaveBeenCalledWith("x", {
+    expect(handle.send).toHaveBeenCalledWith(steerText("x"), {
       activeTurnBehavior: "steer",
       images: [{ data: "QUJD", mimeType: "image/png" }],
     });
@@ -281,7 +282,7 @@ describe("queue drain", () => {
     handlersBox.handlers?.update({ type: "agent_update" });
     await tick(300);
     expect(handle.send).toHaveBeenCalledTimes(2);
-    expect(handle.send).toHaveBeenLastCalledWith("B", { activeTurnBehavior: "steer" });
+    expect(handle.send).toHaveBeenLastCalledWith(steerText("B"), { activeTurnBehavior: "steer" });
     expect(queue.queueFor("s10")).toHaveLength(0);
   });
 

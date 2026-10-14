@@ -2,6 +2,7 @@
 import { columnForStatus, firstLine } from "../shared/presentation";
 import {
   isActiveLiveness,
+  statusForDeclared,
   type AnalysisStatus,
   type BoardColumn,
   type SessionDetail,
@@ -23,6 +24,11 @@ export function effectiveStatusOf(record: SessionRecord): AnalysisStatus {
   }
   if (live && record.lifecycle === "working") {
     return "in_progress";
+  }
+  // The agent's own 「完成 / 阻塞 / 失败」 line beats the model's inference.
+  const declared = record.turns.at(-1)?.declared;
+  if (declared) {
+    return statusForDeclared(declared.kind);
   }
   return record.analysis?.status ?? "unclear";
 }
@@ -74,6 +80,7 @@ export function projectView(record: SessionRecord, now: number = Date.now()): Se
     archivedAt: record.archivedAt,
     turnCount: record.turns.length,
     lastUserInput: firstLine(lastTurn?.userInput ?? null),
+    declared: lastTurn?.declared ?? null,
     modelStatus: record.analysis?.status ?? "unclear",
     effectiveStatus,
     column,
@@ -90,5 +97,6 @@ export function projectDetail(record: SessionRecord, now: number = Date.now()): 
     ...projectView(record, now),
     turns: record.turns.map((turn) => ({ ...turn })),
     firstUserMessage: record.firstUserMessage,
+    history: record.history.map((entry) => ({ ...entry })),
   };
 }

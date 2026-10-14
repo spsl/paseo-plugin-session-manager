@@ -3,9 +3,13 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Pressable, Text, View } from "react-native";
 import {
   permissionView,
+  responseFor,
   type PermissionChoice,
   type PermissionRequestLike,
+  type PermissionResponseLike,
 } from "./permissions";
+import { parseQuestionFormQuestions } from "./question-form";
+import { QuestionFormCard } from "./question-form-card";
 
 function choiceColors(theme: PluginTheme, choice: PermissionChoice) {
   const { colors } = theme;
@@ -22,7 +26,8 @@ export function PermissionCards(props: {
   theme: PluginTheme;
   requests: readonly PermissionRequestLike[];
   busy: boolean;
-  onChoose(requestId: string, choice: PermissionChoice): void;
+  compact: boolean;
+  onRespond(requestId: string, response: PermissionResponseLike): void;
 }) {
   const { colors } = props.theme;
   if (props.requests.length === 0) {
@@ -31,6 +36,22 @@ export function PermissionCards(props: {
   return (
     <View style={{ gap: 8 }}>
       {props.requests.map(function renderRequest(request) {
+        const questions = request.kind === "question" ? parseQuestionFormQuestions(request.input) : null;
+        if (questions !== null) {
+          return (
+            <QuestionFormCard
+              key={request.id}
+              theme={props.theme}
+              input={request.input}
+              questions={questions}
+              busy={props.busy}
+              compact={props.compact}
+              onRespond={function respond(response) {
+                props.onRespond(request.id, response);
+              }}
+            />
+          );
+        }
         const view = permissionView(request);
         return (
           <View
@@ -65,7 +86,7 @@ export function PermissionCards(props: {
                     accessibilityRole="button"
                     disabled={props.busy}
                     onPress={function choose() {
-                      props.onChoose(view.id, choice);
+                      props.onRespond(view.id, responseFor(choice));
                     }}
                     style={{
                       paddingHorizontal: 12,

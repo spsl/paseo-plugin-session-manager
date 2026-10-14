@@ -160,3 +160,42 @@ describe("projectView", () => {
     expect(projectDetail(base).turns).toHaveLength(2);
   });
 });
+
+describe("declared results", () => {
+  const turnWith = (kind: "done" | "blocked" | "failed") => ({
+    id: "t1",
+    dedupeKey: "k",
+    userInput: "u",
+    agentOutput: "o",
+    outcome: "completed" as const,
+    completedAt: 2,
+    contextIncomplete: false,
+    declared: { kind, text: "结论" },
+  });
+
+  it("beats the model's verdict and maps blocked and failed to 需要处理", () => {
+    expect(
+      projectView(record({ turns: [turnWith("done")], analysis: analysis("waiting_for_user") })),
+    ).toMatchObject({ effectiveStatus: "completed", column: "completed", declared: { kind: "done" } });
+    expect(
+      projectView(record({ turns: [turnWith("failed")], analysis: analysis("completed") })),
+    ).toMatchObject({ effectiveStatus: "blocked", column: "waiting_for_user", needsAttention: true });
+  });
+
+  it("yields to manual override and to a running turn", () => {
+    expect(
+      projectView(record({ turns: [turnWith("blocked")], manualStatusOverride: "completed" })).effectiveStatus,
+    ).toBe("completed");
+    expect(projectView(record({ turns: [turnWith("done")], lifecycle: "working" })).effectiveStatus).toBe(
+      "in_progress",
+    );
+  });
+
+  it("only the latest turn counts", () => {
+    const later = { ...turnWith("done"), id: "t2", declared: null };
+    const view = projectView(
+      record({ turns: [turnWith("blocked"), later], analysis: analysis("in_progress") }),
+    );
+    expect(view).toMatchObject({ effectiveStatus: "in_progress", declared: null });
+  });
+});

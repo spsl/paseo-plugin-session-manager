@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { newRecord } from "./lifecycle";
-import { JsonStateStore, MAX_SESSIONS, MAX_TURNS_PER_SESSION, type SessionRecord } from "./store";
+import { MAX_HISTORY_ENTRIES } from "../shared/types";
+import {
+  JsonStateStore,
+  MAX_SESSIONS,
+  MAX_TURNS_PER_SESSION,
+  withTurnHistory,
+  type SessionRecord,
+} from "./store";
 
 let dir: string;
 beforeEach(async () => {
@@ -25,6 +32,7 @@ const turn = (id: string, text = "out") => ({
   outcome: "completed" as const,
   completedAt: 5,
   contextIncomplete: false,
+  declared: null,
 });
 
 describe("JsonStateStore", () => {
@@ -115,6 +123,58 @@ describe("JsonStateStore", () => {
     });
   });
 
+  it("round-trips declared results and the team notification marker", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    store.schedule(() => [
+      make("a", {
+        interruptedAt: 9,
+        interruptNotifiedAt: 9,
+        turns: [
+          { ...turn("t1"), declared: { kind: "blocked", text: "缺权限" } },
+          { ...turn("t2"), declared: { kind: "nope", text: "x" } as never },
+        ],
+      }),
+    ]);
+    await store.flush();
+    const [loaded] = await new JsonStateStore(path).load();
+    expect(loaded.interruptNotifiedAt).toBe(9);
+    expect(loaded.turns.map((t) => t.declared)).toEqual([{ kind: "blocked", text: "缺权限" }, null]);
+  });
+
+  it("round-trips the 之前 history and short analysis fields, dropping bad entries", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    const analysis = {
+      title: "标题",
+      summary: "s",
+      goal: "g",
+      status: "completed" as const,
+      progress: [],
+      completed: [],
+      nextSteps: ["下一步"],
+      blockers: [],
+      needsUserAttention: false,
+      confidence: 0.9,
+      done: ["做完了"],
+      now: "等你确认",
+    };
+    await store.save([
+      make("a", {
+        analysis,
+        history: [{ turnId: "t1", at: 5, text: "做完了" }],
+        historyBaseTurnId: "t0",
+      }),
+    ]);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    raw.sessions[0].history.push({ turnId: "t2", text: "缺时间" });
+    await writeFile(path, JSON.stringify(raw));
+    const [loaded] = await store.load();
+    expect(loaded.history).toEqual([{ turnId: "t1", at: 5, text: "做完了" }]);
+    expect(loaded.historyBaseTurnId).toBe("t0");
+    expect(loaded.analysis).toMatchObject({ done: ["做完了"], now: "等你确认" });
+  });
+
   it("writes the file with mode 0600", async () => {
     const path = join(dir, "state.json");
     const store = new JsonStateStore(path);
@@ -123,5 +183,26 @@ describe("JsonStateStore", () => {
     const { statSync } = await import("node:fs");
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(path, "utf8")).version).toBe(1);
+  });
+});
+
+describe("withTurnHistory", () => {
+  const entry = (turnId: string, text: string) => ({ turnId, at: 1, text });
+
+  it("appends a turn's items and replaces them when the turn is analyzed again", () => {
+    const first = withTurnHistory([entry("t1", "一")], "t2", 2, ["二", "三"]);
+    expect(first.map((item) => item.text)).toEqual(["一", "二", "三"]);
+    expect(first[1]).toEqual({ turnId: "t2", at: 2, text: "二" });
+    const again = withTurnHistory(first, "t2", 3, ["新二"]);
+    expect(again.map((item) => item.text)).toEqual(["一", "新二"]);
+  });
+
+  it("keeps the history for older analyzers and caps its length", () => {
+    expect(withTurnHistory([entry("t1", "一")], "t2", 2, undefined)).toEqual([entry("t1", "一")]);
+    const many = Array.from({ length: MAX_HISTORY_ENTRIES }, (_, index) => entry(`t${index}`, `${index}`));
+    const capped = withTurnHistory(many, "last", 9, ["最新"]);
+    expect(capped).toHaveLength(MAX_HISTORY_ENTRIES);
+    expect(capped.at(-1)?.text).toBe("最新");
+    expect(capped[0].text).toBe("1");
   });
 });

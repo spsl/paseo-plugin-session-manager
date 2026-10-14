@@ -1,5 +1,10 @@
 /** Pure helpers turning Paseo timelines into analyzer turns. */
-import type { Turn } from "../shared/types";
+import {
+  DECLARED_TEXT_MAX_LENGTH,
+  type Declared,
+  type DeclaredKind,
+  type Turn,
+} from "../shared/types";
 import type { AgentTimelineItem } from "./host-types";
 
 export const MAX_TEXT_LENGTH = 16_000;
@@ -42,6 +47,53 @@ function appendError(output: string, message: string): string {
   return trimmed ? `${output.trimEnd()}\n错误：${trimmed}\n` : output;
 }
 
+const DECLARED_LINE = /^[*_]*(完成|阻塞|失败)[*_]*\s*[：:]\s*[*_]*\s*(.*)$/;
+const DECLARED_KINDS_BY_WORD: Record<string, DeclaredKind> = {
+  完成: "done",
+  阻塞: "blocked",
+  失败: "failed",
+};
+
+/** Reads 「完成：…」「阻塞：…」「失败：…」 from the first non-empty line of a reply. */
+export function declaredFrom(message: string): Declared | null {
+  const line = message.split("\n").find((candidate) => candidate.trim() !== "") ?? "";
+  const match = DECLARED_LINE.exec(line.trim());
+  if (!match) {
+    return null;
+  }
+  const text = match[2].replace(/[*_]+$/, "").trim().slice(0, DECLARED_TEXT_MAX_LENGTH);
+  return { kind: DECLARED_KINDS_BY_WORD[match[1]], text };
+}
+
+/**
+ * Tracks the agent's last reply in a turn: consecutive assistant chunks form
+ * one reply; any other item (tool call, reasoning) or a new messageId ends it.
+ */
+class FinalReply {
+  private text = "";
+  private open = false;
+  private messageId: string | undefined;
+
+  add(item: AgentTimelineItem): void {
+    if (item.type === "assistant_message") {
+      const continues =
+        this.open &&
+        (item.messageId === undefined ||
+          this.messageId === undefined ||
+          item.messageId === this.messageId);
+      this.text = continues ? joinText(this.text, item.text) : item.text;
+      this.open = true;
+      this.messageId = item.messageId ?? (continues ? this.messageId : undefined);
+    } else if (item.type !== "error") {
+      this.open = false;
+    }
+  }
+
+  declared(): Declared | null {
+    return declaredFrom(this.text);
+  }
+}
+
 export type TurnOutcomeInput =
   | { kind: "completed" }
   | { kind: "failed"; error: { message: string } }
@@ -67,8 +119,10 @@ export function turnFromTurnEnded(
   }
   const userInput = userIndex >= 0 ? head((timeline[userIndex] as { text: string }).text.trim()) : null;
   let output = "";
+  const finalReply = new FinalReply();
   for (let index = userIndex + 1; index < timeline.length; index += 1) {
     const item = timeline[index];
+    finalReply.add(item);
     if (item.type === "assistant_message") {
       output = joinText(output, item.text);
     } else if (item.type === "error") {
@@ -93,6 +147,7 @@ export function turnFromTurnEnded(
     outcome: outcome.kind,
     completedAt: now,
     contextIncomplete: userIndex < 0,
+    declared: outcome.kind === "completed" ? finalReply.declared() : null,
   };
 }
 
@@ -113,7 +168,13 @@ export type BackfillEntry = {
   seqStart: number;
 };
 
-type Draft = { id: string; userInput: string; output: string; completedAt: number };
+type Draft = {
+  id: string;
+  userInput: string;
+  output: string;
+  completedAt: number;
+  finalReply: FinalReply;
+};
 
 /** Groups timeline entries (oldest first) into turns; each user_message starts one. */
 export function turnsFromTimelineEntries(entries: readonly BackfillEntry[]): Turn[] {
@@ -131,6 +192,7 @@ export function turnsFromTimelineEntries(entries: readonly BackfillEntry[]): Tur
         userInput: head(item.text.trim()),
         output: "",
         completedAt: Number.isFinite(at) ? at : 0,
+        finalReply: new FinalReply(),
       };
       drafts.push(current);
       continue;
@@ -138,6 +200,7 @@ export function turnsFromTimelineEntries(entries: readonly BackfillEntry[]): Tur
     if (!current) {
       continue;
     }
+    current.finalReply.add(item);
     if (item.type === "assistant_message") {
       current.output = joinText(current.output, item.text);
     } else if (item.type === "error") {
@@ -164,6 +227,7 @@ export function turnsFromTimelineEntries(entries: readonly BackfillEntry[]): Tur
       outcome: "completed",
       completedAt: draft.completedAt,
       contextIncomplete: false,
+      declared: draft.finalReply.declared(),
     });
   }
   return turns.slice(-BACKFILL_TURNS);

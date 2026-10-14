@@ -37,7 +37,7 @@ import {
   type SubmitKind,
 } from "./composer-logic";
 import { cachedDraft, useComposerDraft } from "./drafts";
-import { isNearBottom } from "./model";
+import { isNearBottom, steerText } from "./model";
 import { modelCatalogFor } from "./model-catalog";
 import { readPaseoSendBehavior } from "../paseo-app-settings";
 import {
@@ -50,17 +50,19 @@ import {
 } from "./queue";
 import { ensureQueueDrain, markQueuedWhileRunning, nudgeQueueDrain } from "./queue-drain";
 import { PermissionCards } from "./permission-cards";
-import { responseFor, visiblePermissions, type PermissionChoice } from "./permissions";
+import { visiblePermissions, type PermissionResponseLike } from "./permissions";
 import { RowView } from "./rows";
-import { useConversation } from "./use-conversation";
+import type { Conversation } from "./use-conversation";
 
 export function ConversationPane(props: {
   sessionId: string;
+  /** Owned by the overlay so the overview pane reads the same live state. */
+  conversation: Conversation;
   theme: PluginTheme;
   liveness: Liveness;
   compact: boolean;
 }) {
-  const { sessionId, theme, liveness, compact } = props;
+  const { sessionId, conversation, theme, liveness, compact } = props;
   const { colors } = theme;
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -68,7 +70,6 @@ export function ConversationPane(props: {
   const stopCall = useRpc(stopAgentRpc);
   const setModeCall = useRpc(setAgentModeRpc);
   const setThinkingCall = useRpc(setAgentThinkingRpc);
-  const conversation = useConversation(sessionId);
   const { handle, state, agent } = conversation;
 
   const { draft, setDraft } = useComposerDraft(sessionId);
@@ -110,7 +111,11 @@ export function ConversationPane(props: {
           markQueuedWhileRunning(sessionId);
         },
         sendMessage(text, options) {
-          return handle.send(text, options);
+          // Steered turns carry the 追加说明 prefix (same as the board card).
+          return handle.send(
+            options.activeTurnBehavior === "steer" ? steerText(text) : text,
+            options,
+          );
         },
         archive() {
           return handle.archive().then(function done() {
@@ -324,13 +329,13 @@ export function ConversationPane(props: {
     }
   }
 
-  async function choose(requestId: string, choice: PermissionChoice): Promise<void> {
+  async function respond(requestId: string, response: PermissionResponseLike): Promise<void> {
     setAnswering(true);
     setAnswered(function mark(current) {
       return new Set(current).add(requestId);
     });
     try {
-      await handle.respondToPermission({ requestId, response: responseFor(choice) });
+      await handle.respondToPermission({ requestId, response });
       await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
     } catch (error) {
       toast.error(`操作失败：${errorText(error)}`);
@@ -589,8 +594,9 @@ export function ConversationPane(props: {
             theme={theme}
             requests={pending}
             busy={answering}
-            onChoose={function onChoose(requestId, choice) {
-              void choose(requestId, choice);
+            compact={compact}
+            onRespond={function onRespond(requestId, response) {
+              void respond(requestId, response);
             }}
           />
           <Composer

@@ -3,13 +3,19 @@ import { dirname, join } from "node:path";
 import {
   ANALYSIS_STATES,
   ANALYSIS_STATUSES,
+  DECLARED_KINDS,
+  DECLARED_TEXT_MAX_LENGTH,
   LIFECYCLES,
   LIVENESSES,
+  MAX_HISTORY_ENTRIES,
+  STEP_MAX_LENGTH,
   TURN_OUTCOMES,
   normalizeTitle,
   type Analysis,
   type AnalysisState,
   type AnalysisStatus,
+  type Declared,
+  type HistoryEntry,
   type Lifecycle,
   type Liveness,
   type SessionView,
@@ -33,11 +39,24 @@ export type SessionRecord = Omit<
   | "column"
   | "needsAttention"
   | "deferEndedAt"
+  | "declared"
 > & {
+  /**
+   * The `interruptedAt` already reported to the team coordinator, so the
+   * same restart is never reported twice (see notifyInterruptedTeams).
+   */
+  interruptNotifiedAt: number | null;
   turns: Turn[];
   firstUserMessage: string | null;
   firstUserMessageKnown: boolean;
   analyzedTurnId: string | null;
+  /** 之前 items accumulated across analyses, oldest first; outlives the turn window. */
+  history: HistoryEntry[];
+  /**
+   * The history boundary the latest analysis used: reanalyzing the same turn
+   * reuses it, so the same turns count as new and that turn's items are replaced.
+   */
+  historyBaseTurnId: string | null;
   titleState: TitleState;
   /** Agent labels from the last snapshot; only meaningful when `labelsKnown`. */
   labels: Record<string, string>;
@@ -69,6 +88,18 @@ function oneOf<T extends string>(values: readonly T[], value: unknown): T | null
     : null;
 }
 
+function hydrateDeclared(value: unknown): Declared | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const kind = oneOf(DECLARED_KINDS, record.kind);
+  if (!kind || typeof record.text !== "string") {
+    return null;
+  }
+  return { kind, text: record.text.trim().slice(0, DECLARED_TEXT_MAX_LENGTH) };
+}
+
 function hydrateTurn(value: unknown): Turn | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -89,7 +120,44 @@ function hydrateTurn(value: unknown): Turn | null {
     outcome: oneOf(TURN_OUTCOMES, record.outcome) ?? "completed",
     completedAt,
     contextIncomplete: record.contextIncomplete === true,
+    declared: hydrateDeclared(record.declared),
   };
+}
+
+function hydrateHistoryEntry(value: unknown): HistoryEntry | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const turnId = boundedText(record.turnId);
+  const at = finiteNumber(record.at);
+  const text = boundedText(record.text);
+  if (!turnId || at === null || !text) {
+    return null;
+  }
+  return { turnId, at, text: text.slice(0, STEP_MAX_LENGTH) };
+}
+
+function hydrateHistory(value: unknown): HistoryEntry[] {
+  return (Array.isArray(value) ? value : [])
+    .map(hydrateHistoryEntry)
+    .filter((entry): entry is HistoryEntry => entry !== null)
+    .slice(-MAX_HISTORY_ENTRIES);
+}
+
+/** Replaces one turn's 之前 items with `done`; `undefined` (older analyzers) keeps them. */
+export function withTurnHistory(
+  history: readonly HistoryEntry[],
+  turnId: string,
+  at: number,
+  done: readonly string[] | undefined,
+): HistoryEntry[] {
+  if (done === undefined) {
+    return history.map((entry) => ({ ...entry }));
+  }
+  const kept = history.filter((entry) => entry.turnId !== turnId);
+  const added = done.map((text) => ({ turnId, at, text }));
+  return [...kept, ...added].slice(-MAX_HISTORY_ENTRIES);
 }
 
 function hydrateAnalysis(value: unknown): Analysis | null {
@@ -113,6 +181,8 @@ function hydrateAnalysis(value: unknown): Analysis | null {
   const completed = list("completed");
   const nextSteps = list("nextSteps");
   const blockers = list("blockers");
+  const done = record.done === undefined ? null : list("done");
+  const now = boundedText(record.now);
   const confidence = finiteNumber(record.confidence);
   if (
     !summary ||
@@ -140,6 +210,8 @@ function hydrateAnalysis(value: unknown): Analysis | null {
     blockers,
     needsUserAttention: record.needsUserAttention,
     confidence: Math.min(1, Math.max(0, confidence)),
+    ...(done ? { done } : {}),
+    ...(now ? { now } : {}),
   };
 }
 
@@ -209,6 +281,7 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     deferredUntil,
     deferToQueue: deferredUntil !== null && record.deferToQueue === true,
     interruptedAt: finiteNumber(record.interruptedAt),
+    interruptNotifiedAt: finiteNumber(record.interruptNotifiedAt),
     // Resume progress is runtime-only: nothing is mid-resume right after a load.
     resumeState: "idle",
     resumeError: null,
@@ -221,6 +294,8 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     firstUserMessage: boundedText(record.firstUserMessage),
     firstUserMessageKnown: record.firstUserMessageKnown === true,
     analyzedTurnId: boundedText(record.analyzedTurnId),
+    history: hydrateHistory(record.history),
+    historyBaseTurnId: boundedText(record.historyBaseTurnId),
     labels: labels ?? {},
     labelsKnown: labels !== null,
   };
@@ -230,6 +305,7 @@ export function copyRecord(record: SessionRecord): SessionRecord {
   return {
     ...record,
     turns: record.turns.map((turn) => ({ ...turn })),
+    history: record.history.map((entry) => ({ ...entry })),
     titleState: { ...record.titleState },
     labels: { ...record.labels },
     analysis: record.analysis
@@ -239,6 +315,7 @@ export function copyRecord(record: SessionRecord): SessionRecord {
           completed: [...record.analysis.completed],
           nextSteps: [...record.analysis.nextSteps],
           blockers: [...record.analysis.blockers],
+          ...(record.analysis.done ? { done: [...record.analysis.done] } : {}),
         }
       : null,
   };
@@ -256,6 +333,7 @@ export function boundRecords(records: readonly SessionRecord[]): SessionRecord[]
         agentOutput: turn.agentOutput.slice(0, MAX_TEXT_LENGTH),
       }));
       copy.firstUserMessage = copy.firstUserMessage?.slice(0, MAX_TEXT_LENGTH) ?? null;
+      copy.history = copy.history.slice(-MAX_HISTORY_ENTRIES);
       return copy;
     });
 }

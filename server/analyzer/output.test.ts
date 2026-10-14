@@ -3,7 +3,14 @@ import {
   parseAnalysis,
   parseAnalysisOutput
 } from './output'
-import { SPEECH_MAX_LENGTH, speechOf, type Analysis } from '../../shared/types'
+import {
+  MAX_DONE_ITEMS,
+  NOW_MAX_LENGTH,
+  SPEECH_MAX_LENGTH,
+  STEP_MAX_LENGTH,
+  speechOf,
+  type Analysis
+} from '../../shared/types'
 
 const analysis: Analysis = {
   title: '完成需求实现',
@@ -51,6 +58,23 @@ describe('analyzer output', () => {
     expect(() =>
       parseAnalysis({ ...analysis, progress: ['x'.repeat(4_001)] })
     ).toThrow(/progress/)
+  })
+
+  it('keeps done and now short and treats them as optional', () => {
+    const parsed = parseAnalysis({
+      ...analysis,
+      done: ['  完成 A  ', '', 'x'.repeat(STEP_MAX_LENGTH + 5), 'B', 'C'],
+      now: 'y'.repeat(NOW_MAX_LENGTH + 5)
+    })
+    expect(parsed.done).toHaveLength(MAX_DONE_ITEMS)
+    expect(parsed.done?.[0]).toBe('完成 A')
+    expect(parsed.done?.[1]).toHaveLength(STEP_MAX_LENGTH)
+    expect(parsed.done?.[1].endsWith('…')).toBe(true)
+    expect(parsed.now).toHaveLength(NOW_MAX_LENGTH)
+    expect(parseAnalysis(analysis)).not.toHaveProperty('done')
+    expect(parseAnalysis(analysis)).not.toHaveProperty('now')
+    expect(() => parseAnalysis({ ...analysis, done: [1] })).toThrow(/done/)
+    expect(() => parseAnalysis({ ...analysis, now: 1 })).toThrow(/now/)
   })
 
   it('accepts legacy output without a title by deriving one from the goal', () => {

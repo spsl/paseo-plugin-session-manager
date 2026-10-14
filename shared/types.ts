@@ -68,6 +68,18 @@ export const BoardColumnSchema = z.enum(BOARD_COLUMNS);
 /** Max characters of the one-sentence spoken/card summary. */
 export const SPEECH_MAX_LENGTH = 80;
 
+/** Max characters of one 之前 / 下一步 item. */
+export const STEP_MAX_LENGTH = 40;
+
+/** Max characters of the 现在 sentence. */
+export const NOW_MAX_LENGTH = 60;
+
+/** Max 之前 items one analysis may add. */
+export const MAX_DONE_ITEMS = 3;
+
+/** Max persisted 之前 entries per session. */
+export const MAX_HISTORY_ENTRIES = 40;
+
 export const AnalysisSchema = z.object({
   /** A concise, model-generated description of the current task. */
   title: z.string(),
@@ -82,6 +94,10 @@ export const AnalysisSchema = z.object({
   blockers: z.array(z.string()),
   needsUserAttention: z.boolean(),
   confidence: z.number(),
+  /** What the newly analyzed turns finished; appended to the session history. Absent on older analyses. */
+  done: z.array(z.string()).optional(),
+  /** One short sentence on what the session is doing or waiting on. Absent on older analyses. */
+  now: z.string().optional(),
 });
 export type Analysis = z.infer<typeof AnalysisSchema>;
 
@@ -97,6 +113,33 @@ export function speechOf(analysis: Pick<Analysis, "speech" | "summary">): string
 export const TURN_OUTCOMES = ["completed", "failed", "canceled"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
+export const DECLARED_KINDS = ["done", "blocked", "failed"] as const;
+export type DeclaredKind = (typeof DECLARED_KINDS)[number];
+
+/** Max characters kept from a declared result line. */
+export const DECLARED_TEXT_MAX_LENGTH = 200;
+
+/**
+ * The status an agent declared itself on the first line of its final reply
+ * (「完成：…」「阻塞：…」「失败：…」, the /dev-team reply convention).
+ */
+export const DeclaredSchema = z.object({
+  kind: z.enum(DECLARED_KINDS),
+  text: z.string(),
+});
+export type Declared = z.infer<typeof DeclaredSchema>;
+
+/** Done is completed; blocked and failed both need the user (需要处理). */
+export function statusForDeclared(kind: DeclaredKind): AnalysisStatus {
+  return kind === "done" ? "completed" : "blocked";
+}
+
+export const DECLARED_KIND_LABELS: Record<DeclaredKind, string> = {
+  done: "完成",
+  blocked: "阻塞",
+  failed: "失败",
+};
+
 export const TurnSchema = z.object({
   id: z.string(),
   /** Stable content key; a turn with the same id OR dedupeKey updates in place. */
@@ -106,8 +149,19 @@ export const TurnSchema = z.object({
   outcome: z.enum(TURN_OUTCOMES),
   completedAt: z.number(),
   contextIncomplete: z.boolean(),
+  /** Absent on turns recorded before declarations were parsed. */
+  declared: DeclaredSchema.nullable().optional(),
 });
 export type Turn = z.infer<typeof TurnSchema>;
+
+/** One 之前 item, kept across analyses beyond the stored turn window. */
+export const HistoryEntrySchema = z.object({
+  /** The turn whose analysis produced it; reanalyzing that turn replaces its items. */
+  turnId: z.string(),
+  at: z.number(),
+  text: z.string(),
+});
+export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
 
 export const TitleStateSchema = z.object({
   /** The last title this plugin wrote to the Paseo agent. */
@@ -162,6 +216,8 @@ export const SessionViewSchema = z.object({
   archivedAt: z.number().nullable(),
   turnCount: z.number(),
   lastUserInput: z.string().nullable(),
+  /** The latest turn's self-declared result line, if any. */
+  declared: DeclaredSchema.nullable(),
   /** Latest model verdict, without lifecycle or user override applied. */
   modelStatus: AnalysisStatusSchema,
   /** The status the live board presents before the closed column is applied. */
@@ -174,5 +230,7 @@ export type SessionView = z.infer<typeof SessionViewSchema>;
 export const SessionDetailSchema = SessionViewSchema.extend({
   turns: z.array(TurnSchema),
   firstUserMessage: z.string().nullable(),
+  /** 之前 items, oldest first. */
+  history: z.array(HistoryEntrySchema),
 });
 export type SessionDetail = z.infer<typeof SessionDetailSchema>;

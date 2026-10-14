@@ -1,6 +1,9 @@
 import {
   ANALYSIS_STATUSES,
+  MAX_DONE_ITEMS,
+  NOW_MAX_LENGTH,
   SPEECH_MAX_LENGTH,
+  STEP_MAX_LENGTH,
   TITLE_MAX_LENGTH,
   normalizeTitle,
   type Analysis,
@@ -44,22 +47,42 @@ function analysisTitle(record: Record<string, unknown>): string {
   return normalized
 }
 
-/** Optional for older analyzers; when present it must be a string, and is trimmed to the card/voice limit. */
-function analysisSpeech(record: Record<string, unknown>): string | undefined {
-  const value = record.speech
+function clipLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, maxLength - 1)}…`
+    : normalized
+}
+
+/** Optional for older analyzers; when present it must be a string, and is trimmed to `maxLength`. */
+function optionalLine(
+  record: Record<string, unknown>,
+  key: string,
+  maxLength: number
+): string | undefined {
+  const value = record[key]
   if (value === undefined || value === null) {
     return undefined
   }
   if (typeof value !== 'string') {
-    throw new Error('分析结果字段 speech 无效')
+    throw new Error(`分析结果字段 ${key} 无效`)
   }
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (!normalized) {
+  return clipLine(value, maxLength) || undefined
+}
+
+/** Optional for older analyzers; items are trimmed to one short line each. */
+function analysisDone(record: Record<string, unknown>): string[] | undefined {
+  const value = record.done
+  if (value === undefined || value === null) {
     return undefined
   }
-  return normalized.length > SPEECH_MAX_LENGTH
-    ? `${normalized.slice(0, SPEECH_MAX_LENGTH - 1)}…`
-    : normalized
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error('分析结果字段 done 无效')
+  }
+  return (value as string[])
+    .map((item) => clipLine(item, STEP_MAX_LENGTH))
+    .filter((item) => item !== '')
+    .slice(0, MAX_DONE_ITEMS)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -118,7 +141,9 @@ export function parseAnalysis(value: unknown): Analysis {
   if (typeof record.needsUserAttention !== 'boolean') {
     throw new Error('分析结果人工介入字段无效')
   }
-  const speech = analysisSpeech(record)
+  const speech = optionalLine(record, 'speech', SPEECH_MAX_LENGTH)
+  const now = optionalLine(record, 'now', NOW_MAX_LENGTH)
+  const done = analysisDone(record)
   return {
     title: analysisTitle(record),
     summary: text(record, 'summary', 2_000),
@@ -130,7 +155,9 @@ export function parseAnalysis(value: unknown): Analysis {
     nextSteps: textList(record, 'nextSteps'),
     blockers: textList(record, 'blockers'),
     needsUserAttention: record.needsUserAttention,
-    confidence
+    confidence,
+    ...(done === undefined ? {} : { done }),
+    ...(now === undefined ? {} : { now })
   }
 }
 

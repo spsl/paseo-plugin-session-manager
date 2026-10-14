@@ -26,6 +26,11 @@ export const ANALYZER_SETTINGS = defineSettings({
     closedRetentionDays: z.number().int().min(1).max(90).default(7),
     /** Which dormant sessions to resume after a Paseo restart. */
     autoResume: z.enum(["attention", "all", "off"]).default("attention"),
+    /**
+     * After a Paseo restart, tell a /dev-team coordinator which of its team
+     * sub-agents (label `team`) were interrupted, so it resumes the flow.
+     */
+    teamRecovery: z.enum(["notify", "off"]).default("notify"),
     /** Board column width as a percentage of the width that would fill the screen. */
     columnWidthPercent: z.number().int().min(30).max(500).default(90),
     /** Comma/whitespace separated label keys (or key=value); matching agents are hidden and never analyzed. */
@@ -50,6 +55,7 @@ export const DEFAULT_ANALYZER_SETTINGS: AnalyzerSettings = {
   seedAnalyzeLimit: 10,
   closedRetentionDays: 7,
   autoResume: "attention",
+  teamRecovery: "notify",
   columnWidthPercent: 90,
   excludedLabelKeys: "herald.role",
 };
