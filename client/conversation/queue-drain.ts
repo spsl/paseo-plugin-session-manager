@@ -15,7 +15,7 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { watchAgents } from "../agents-watch";
 import { imagesOption } from "./composer-images";
-import { queueFor, queuedSessionIds, requeueFront, takeQueuedMessage } from "./queue";
+import { clearQueue, queueFor, queuedSessionIds, requeueFront, takeQueuedMessage } from "./queue";
 
 type Paseo = PluginClientContext["paseo"];
 type AgentHandle = ReturnType<Paseo["agents"]["ref"]>;
@@ -87,6 +87,14 @@ async function refreshRecord(record: DrainRecord): Promise<Snapshot | null> {
   return snapshotOf(record.handle);
 }
 
+/** An archived session's queue is dead weight: drop it and stop watching. */
+function dropArchivedQueue(sessionId: string): void {
+  clearQueue(sessionId);
+  if (queuedSessionIds().length === 0) {
+    release();
+  }
+}
+
 async function observeAndDrain(sessionId: string): Promise<void> {
   const record = recordFor(sessionId);
   if (record === null) {
@@ -95,6 +103,12 @@ async function observeAndDrain(sessionId: string): Promise<void> {
   const snap = await refreshRecord(record);
   const current = records.get(sessionId);
   if (snap === null || current === undefined) {
+    return;
+  }
+  if (current.handle.archivedAt != null) {
+    // The daemon unarchives on send; never resurrect a session the user
+    // archived (archiving also stops the agent, which looks like a trigger).
+    dropArchivedQueue(sessionId);
     return;
   }
   const trigger = drainTrigger(current.lastRunning, snap);
@@ -199,6 +213,10 @@ async function sendNext(sessionId: string): Promise<void> {
     if (isRunning(snap)) {
       return;
     }
+    if (record.handle.archivedAt != null) {
+      dropArchivedQueue(sessionId);
+      return;
+    }
     const head = queueFor(sessionId)[0];
     if (head === undefined) {
       return;
@@ -212,6 +230,10 @@ async function sendNext(sessionId: string): Promise<void> {
         activeTurnBehavior: "steer",
         ...imagesOption(message.images),
       });
+      // The daemon's send reply only lands after the run has started, so the
+      // agent is running now — even when its whole turn fits inside one
+      // debounce window and the next observation is already idle.
+      record.lastRunning = true;
     } catch (error) {
       requeueFront(sessionId, message);
       console.warn("[session-manager] 排队消息发送失败", error);

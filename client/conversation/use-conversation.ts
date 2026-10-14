@@ -31,6 +31,7 @@ export type AgentInfo = {
   provider: string | null;
   model: string | null;
   thinkingOptionId: string | null;
+  effectiveThinkingOptionId: string | null;
   currentModeId: string | null;
   modes: readonly { id: string; label: string; icon?: string }[];
   usage: { used: number; max: number } | null;
@@ -44,6 +45,7 @@ const NO_AGENT: AgentInfo = {
   provider: null,
   model: null,
   thinkingOptionId: null,
+  effectiveThinkingOptionId: null,
   currentModeId: null,
   modes: [],
   usage: null,
@@ -77,6 +79,7 @@ function readAgent(handle: AgentHandle): AgentInfo {
     provider: snap?.provider ?? null,
     model: snap?.model ?? null,
     thinkingOptionId: snap?.thinkingOptionId ?? null,
+    effectiveThinkingOptionId: snap?.effectiveThinkingOptionId ?? null,
     currentModeId: snap?.currentModeId ?? null,
     modes: (snap?.availableModes ?? []).map(function toMode(mode) {
       return { id: mode.id, label: mode.label, icon: mode.icon };

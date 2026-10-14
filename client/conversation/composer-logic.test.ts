@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applySlashCommandReplacement,
+  buildSlashEntries,
   clampComposerHeight,
   composerMaxHeight,
   composerMinHeight,
@@ -11,8 +12,11 @@ import {
   keyIntent,
   nextModeId,
   placeholderFor,
+  popoverKeyIntent,
   primaryAction,
+  rankSlashEntries,
   resolveActiveSendBehavior,
+  resolveThinkingOptionId,
   restoredDraft,
   turnBehaviorFor,
 } from "./composer-logic";
@@ -97,7 +101,13 @@ describe("primaryAction", () => {
 });
 
 describe("keyIntent", () => {
-  const base = { submitOnEnter: true, running: false, sending: false, canCycleMode: false };
+  const base = {
+    submitOnEnter: true,
+    running: false,
+    sending: false,
+    stopping: false,
+    canCycleMode: false,
+  };
 
   it("ignores IME composition", () => {
     expect(keyIntent({ key: "Enter", isComposing: true }, base)).toBe("none");
@@ -120,9 +130,12 @@ describe("keyIntent", () => {
     expect(keyIntent({ key: "Enter", metaKey: true, shiftKey: true }, running)).toBe("newline");
   });
 
-  it("Esc interrupts only while running", () => {
+  it("Esc interrupts only while running and not already stopping", () => {
     expect(keyIntent({ key: "Escape" }, { ...base, running: true })).toBe("interrupt");
     expect(keyIntent({ key: "Escape" }, base)).toBe("none");
+    expect(
+      keyIntent({ key: "Escape" }, { ...base, running: true, stopping: true }),
+    ).toBe("none");
   });
 
   it("Shift+Tab cycles modes only when several exist", () => {
@@ -415,5 +428,192 @@ describe("createComposerSubmitter", () => {
     releaseRef.fn?.();
     await first;
     expect(effects.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("archiveNow archives immediately and shares the in-flight guard", async () => {
+    const effects = makeEffects();
+    const submitter = createComposerSubmitter(effects);
+    expect(await submitter.archiveNow()).toBe("archived");
+    expect(effects.archive).toHaveBeenCalledTimes(1);
+    expect(effects.clearInput).toHaveBeenCalledTimes(1);
+
+    const heldEffects = makeEffects();
+    const releaseRef: { fn: (() => void) | null } = { fn: null };
+    heldEffects.sendMessage.mockImplementation(
+      () =>
+        new Promise<void>(function hold(resolve) {
+          releaseRef.fn = resolve;
+        }),
+    );
+    const busy = createComposerSubmitter(heldEffects);
+    const first = busy.submit({
+      kind: "default",
+      running: false,
+      hasPendingPermission: false,
+      behavior: "steer",
+      text: "一",
+      images: [],
+    });
+    expect(await busy.archiveNow()).toBe("none");
+    releaseRef.fn?.();
+    await first;
+    expect(heldEffects.archive).not.toHaveBeenCalled();
+  });
+});
+
+type Command = {
+  name: string;
+  description: string;
+  argumentHint: string;
+  kind?: "command" | "skill";
+};
+
+function commandsResult(commands: Command[], error: string | null = null) {
+  return { agentId: "a", commands, error, requestId: "r" } as never;
+}
+
+describe("buildSlashEntries", () => {
+  it("puts builtin /exit first and drops provider collisions", () => {
+    const entries = buildSlashEntries(
+      commandsResult([
+        { name: "review", description: "Review code", argumentHint: "" },
+        { name: "quit", description: "provider quit", argumentHint: "" },
+      ]),
+    );
+    expect(entries).not.toBeNull();
+    expect(entries?.[0].name).toBe("exit");
+    expect(entries?.[0].aliases).toEqual(["quit", "q"]);
+    expect(entries?.map(function name(e) { return e.name; })).toEqual(["exit", "review"]);
+  });
+
+  it("returns null on a provider error", () => {
+    expect(buildSlashEntries(commandsResult([], "provider down"))).toBeNull();
+    expect(buildSlashEntries(commandsResult([]))).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "exit" })]),
+    );
+  });
+});
+
+describe("rankSlashEntries", () => {
+  const entries = buildSlashEntries(
+    commandsResult([
+      {
+        name: "ask",
+        description: "Answer a quick question about the codebase",
+        argumentHint: "<question>",
+        kind: "skill",
+      },
+      { name: "review", description: "Review code", argumentHint: "" },
+    ]),
+  );
+  const start = (query: string) => ({
+    start: 0,
+    end: query.length + 1,
+    query,
+    position: "start" as const,
+  });
+  const inline = (query: string, startAt: number, end: number) => ({
+    start: startAt,
+    end,
+    query,
+    position: "inline" as const,
+  });
+
+  it("/q and /quit resolve to the builtin exit through its aliases", () => {
+    if (entries === null) {
+      throw new Error("entries");
+    }
+    expect(rankSlashEntries(entries, start("q"))[0].name).toBe("exit");
+    expect(rankSlashEntries(entries, start("quit"))[0].name).toBe("exit");
+    expect(rankSlashEntries(entries, start("exit"))[0].name).toBe("exit");
+  });
+
+  it("never scores the description — a fuzzy hit there does not surface", () => {
+    if (entries === null) {
+      throw new Error("entries");
+    }
+    // "quick question" lives only in ask's description; /q must not rank it.
+    const ranked = rankSlashEntries(entries, start("q"));
+    expect(ranked.map(function name(e) { return e.name; })).toEqual(["exit"]);
+    expect(
+      rankSlashEntries(entries, start("quest")).map(function name(e) {
+        return e.name;
+      }),
+    ).toEqual([]);
+  });
+
+  it("inline position only offers provider skills", () => {
+    if (entries === null) {
+      throw new Error("entries");
+    }
+    const match = inline("a", 6, 7);
+    const ranked = rankSlashEntries(entries, match);
+    expect(ranked.every(function skill(e) { return e.source === "provider" && e.kind === "skill"; })).toBe(
+      true,
+    );
+  });
+
+  it("empty query keeps the entry order", () => {
+    if (entries === null) {
+      throw new Error("entries");
+    }
+    const ranked = rankSlashEntries(entries, start(""));
+    expect(ranked[0].name).toBe("exit");
+    expect(ranked).toHaveLength(3);
+  });
+});
+
+describe("popoverKeyIntent", () => {
+  it("ignores IME composition before anything else", () => {
+    expect(popoverKeyIntent({ key: "Enter", isComposing: true })).toBe("none");
+    expect(popoverKeyIntent({ key: "ArrowDown", keyCode: 229 })).toBe("none");
+    expect(popoverKeyIntent({ key: "ArrowUp", isComposing: true })).toBe("none");
+  });
+
+  it("moves, accepts and dismisses", () => {
+    expect(popoverKeyIntent({ key: "ArrowDown" })).toBe("down");
+    expect(popoverKeyIntent({ key: "ArrowUp" })).toBe("up");
+    expect(popoverKeyIntent({ key: "Enter" })).toBe("accept");
+    expect(popoverKeyIntent({ key: "Tab" })).toBe("accept");
+    expect(popoverKeyIntent({ key: "Escape" })).toBe("dismiss");
+  });
+
+  it("modified Enter falls through to normal key handling", () => {
+    expect(popoverKeyIntent({ key: "Enter", metaKey: true })).toBe("none");
+    expect(popoverKeyIntent({ key: "Enter", ctrlKey: true })).toBe("none");
+    expect(popoverKeyIntent({ key: "Enter", shiftKey: true })).toBe("none");
+    expect(popoverKeyIntent({ key: "x" })).toBe("none");
+  });
+});
+
+describe("resolveThinkingOptionId", () => {
+  const options = [{ id: "low" }, { id: "high" }];
+
+  it("prefers the runtime option, then explicit, then model default, then first", () => {
+    expect(
+      resolveThinkingOptionId(
+        { effectiveThinkingOptionId: "high", thinkingOptionId: "low" },
+        "low",
+        options,
+      ),
+    ).toBe("high");
+    expect(
+      resolveThinkingOptionId(
+        { effectiveThinkingOptionId: null, thinkingOptionId: "low" },
+        "high",
+        options,
+      ),
+    ).toBe("low");
+    expect(
+      resolveThinkingOptionId(
+        { effectiveThinkingOptionId: null, thinkingOptionId: "default" },
+        "high",
+        options,
+      ),
+    ).toBe("high");
+    expect(
+      resolveThinkingOptionId({ thinkingOptionId: null }, null, options),
+    ).toBe("low");
+    expect(resolveThinkingOptionId({}, null, [])).toBeNull();
   });
 });

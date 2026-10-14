@@ -24,6 +24,8 @@ export type ComposerPalette = {
   stop: string;
   error: string;
   stopForeground: string;
+  /** Paseo context-ring warning band: palette.amber[500], theme-independent. */
+  amber: string;
 };
 
 type PaletteExtras = Pick<
@@ -103,5 +105,17 @@ export function composerPalette(theme: PluginTheme): ComposerPalette {
     stop: "#dc2626",
     error: "#ef4444",
     stopForeground: "#ffffff",
+    amber: "#f59e0b",
   };
+}
+
+/** Paseo context ring: >90% destructive, >=70% amber[500], else foregroundMuted. */
+export function contextColor(palette: ComposerPalette, pct: number): string {
+  if (pct > 90) {
+    return palette.destructive;
+  }
+  if (pct >= 70) {
+    return palette.amber;
+  }
+  return palette.foregroundMuted;
 }

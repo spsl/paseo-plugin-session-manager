@@ -64,6 +64,13 @@ export function requeueFront(sessionId: string, message: QueuedMessage): void {
   emit(sessionId);
 }
 
+/** Drops a session's queue entirely — used when the agent is archived. */
+export function clearQueue(sessionId: string): void {
+  if (queues.delete(sessionId)) {
+    emit(sessionId);
+  }
+}
+
 export function queueFor(sessionId: string): readonly QueuedMessage[] {
   return queues.get(sessionId) ?? EMPTY;
 }

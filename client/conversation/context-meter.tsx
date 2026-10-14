@@ -4,25 +4,15 @@
  * construction: each half of the circle has an overflow-hidden window holding
  * a rotating square with a D-shaped semicircle inside, so the arc sweeps
  * clockwise from 12 o'clock. Colors follow Paseo's thresholds: >90%
- * destructive, >=70% warning, otherwise foregroundMuted.
+ * destructive, >=70% palette.amber[500], otherwise foregroundMuted; the
+ * stroke is 2px like the host's unlabeled meter.
  */
-import type { PluginTheme } from "@getpaseo/plugin";
 import { Pressable, View } from "react-native";
-import type { ComposerPalette } from "./composer-tokens";
+import { contextColor, type ComposerPalette } from "./composer-tokens";
 
 const RING = 14;
 const HALF = RING / 2;
-const BORDER = 1.75;
-
-export function contextColor(palette: ComposerPalette, warning: string, pct: number): string {
-  if (pct > 90) {
-    return palette.destructive;
-  }
-  if (pct >= 70) {
-    return warning;
-  }
-  return palette.foregroundMuted;
-}
+const BORDER = 2;
 
 /** D-shaped right semicircle stroke drawn at the right edge of a RING box. */
 function RightSemi(props: { color: string }) {
@@ -76,7 +66,6 @@ function HalfClip(props: { color: string; side: "left" | "right"; degrees: numbe
 }
 
 export function ContextMeter(props: {
-  theme: PluginTheme;
   palette: ComposerPalette;
   used: number;
   max: number;
@@ -84,7 +73,7 @@ export function ContextMeter(props: {
 }) {
   const { palette } = props;
   const pct = props.max > 0 ? Math.min(100, Math.max(0, (props.used / props.max) * 100)) : 0;
-  const color = contextColor(palette, props.theme.colors.statusWarning, pct);
+  const color = contextColor(palette, pct);
   // Right window shows the first 180deg of the sweep: its semicircle starts
   // rotated out of view (-180) and comes to rest at 0deg (50% progress).
   const rightDegrees = Math.min(0, (pct / 100) * 360 - 180);

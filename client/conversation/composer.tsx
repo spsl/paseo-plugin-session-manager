@@ -28,11 +28,14 @@ import {
   composerMaxHeight,
   composerMinHeight,
   findActiveSlashCommand,
+  isImeComposing,
   keyIntent,
   nextModeId,
   placeholderFor,
+  popoverKeyIntent,
   primaryAction,
   rankSlashEntries,
+  SLASH_VISIBLE_LIMIT,
   type KeyInfo,
   type SendBehavior,
   type SlashCommandEntry,
@@ -45,7 +48,6 @@ import type { QueuedMessage } from "./queue";
 import { SlashPopover } from "./slash-popover";
 import {
   attachComposerDomListeners,
-  attachFocusShortcut,
   autofocusInput,
   canMeasureTextarea,
   domInputNode,
@@ -77,6 +79,8 @@ const EMPTY_ENTRIES: readonly SlashCommandEntry[] = [];
 function QueuedRow(props: {
   palette: ReturnType<typeof composerPalette>;
   message: QueuedMessage;
+  /** In-flight submit: editing/sending a queue entry is disabled meanwhile. */
+  disabled: boolean;
   onEdit(): void;
   onSendNow(): void;
 }) {
@@ -104,6 +108,7 @@ function QueuedRow(props: {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="编辑排队消息"
+        disabled={props.disabled}
         onPress={props.onEdit}
         style={{
           width: 32,
@@ -112,6 +117,7 @@ function QueuedRow(props: {
           alignItems: "center",
           justifyContent: "center",
           backgroundColor: palette.surface2,
+          opacity: props.disabled ? 0.5 : 1,
         }}
       >
         <Icon name="Pencil" size={14} color={palette.foreground} />
@@ -119,6 +125,7 @@ function QueuedRow(props: {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="立即发送排队消息"
+        disabled={props.disabled}
         onPress={props.onSendNow}
         style={{
           width: 32,
@@ -127,6 +134,7 @@ function QueuedRow(props: {
           alignItems: "center",
           justifyContent: "center",
           backgroundColor: palette.accent,
+          opacity: props.disabled ? 0.5 : 1,
         }}
       >
         <Icon name="ArrowUp" size={14} color={palette.accentForeground} />
@@ -189,6 +197,8 @@ export function Composer(props: {
   onEditQueued(message: QueuedMessage): void;
   onSendQueuedNow(message: QueuedMessage): void;
   onSubmit(kind: SubmitKind): void;
+  /** Builtin /exit in the popover archives immediately (Paseo execution:"immediate"). */
+  onArchive(): void;
   onStop(): void;
   slashCommands: readonly SlashCommandEntry[] | null;
   onSlashNeeded(): void;
@@ -311,29 +321,28 @@ export function Composer(props: {
     },
     [isWeb, props.compact],
   );
-  // Cmd/Ctrl+L focuses the input, like Paseo (web document-level listener).
-  useEffect(
-    function focusShortcut() {
-      if (!isWeb) {
-        return undefined;
-      }
-      return attachFocusShortcut(domInputNode(inputRef.current));
-    },
-    [isWeb],
-  );
-  const wasBusy = useRef(false);
+  // Web keeps focus after send/stop; native blurs only after a submit and
+  // refocuses after a stop (Paseo gs calls focus() on every platform).
+  const wasSending = useRef(false);
+  const wasStopping = useRef(false);
   useEffect(
     function refocus() {
-      const busy = props.sending || props.stopping;
-      if (wasBusy.current && !busy) {
+      if (wasSending.current && !props.sending) {
         if (isWeb) {
-          // Web keeps focus after send/stop; native blurs after send.
           focusInput(domInputNode(inputRef.current));
         } else {
           inputRef.current?.blur();
         }
       }
-      wasBusy.current = busy;
+      if (wasStopping.current && !props.stopping) {
+        if (isWeb) {
+          focusInput(domInputNode(inputRef.current));
+        } else {
+          inputRef.current?.focus();
+        }
+      }
+      wasSending.current = props.sending;
+      wasStopping.current = props.stopping;
     },
     [props.sending, props.stopping, isWeb],
   );
@@ -354,7 +363,10 @@ export function Composer(props: {
     props.slashCommands !== null && slashMatch !== null && !slashDismissed
       ? rankSlashEntries(props.slashCommands, slashMatch)
       : EMPTY_ENTRIES;
-  const popoverOpen = slashEntries.length > 0;
+  // Keyboard navigation and rendering share the same truncated list, so a
+  // highlight can never land on a row the popover does not show.
+  const slashVisible = slashEntries.slice(0, SLASH_VISIBLE_LIMIT);
+  const popoverOpen = slashVisible.length > 0;
   const slashKey = slashMatch === null ? "" : `${slashMatch.start}:${slashMatch.query}`;
   useEffect(
     function resetHighlight() {
@@ -364,6 +376,11 @@ export function Composer(props: {
   );
 
   function acceptSlash(entry: SlashCommandEntry): void {
+    if (entry.source === "builtin") {
+      // /exit executes immediately instead of rewriting the draft (Paseo).
+      props.onArchive();
+      return;
+    }
     if (slashMatch === null) {
       return;
     }
@@ -376,28 +393,30 @@ export function Composer(props: {
 
   function onKeyPress(event: KeyPressEvent): void {
     const native = event.nativeEvent;
+    // IME composition keys are ignored before any popover/submit handling.
+    if (isImeComposing(native)) {
+      return;
+    }
     if (popoverOpen) {
-      const key = native.key;
-      if (key === "ArrowDown" || key === "ArrowUp") {
+      const intent = popoverKeyIntent(native);
+      if (intent === "down" || intent === "up") {
         native.preventDefault?.();
         setHighlight(function move(previous) {
-          const delta = key === "ArrowDown" ? 1 : -1;
+          const delta = intent === "down" ? 1 : -1;
           const next = previous + delta;
-          return Math.max(0, Math.min(slashEntries.length - 1, next));
+          return Math.max(0, Math.min(slashVisible.length - 1, next));
         });
         return;
       }
-      if (key === "Enter" || key === "Tab") {
-        if (key === "Tab" || (native.shiftKey !== true && native.metaKey !== true && native.ctrlKey !== true)) {
-          native.preventDefault?.();
-          const entry = slashEntries[Math.min(highlight, slashEntries.length - 1)];
-          if (entry !== undefined) {
-            acceptSlash(entry);
-          }
-          return;
+      if (intent === "accept") {
+        native.preventDefault?.();
+        const entry = slashVisible[Math.min(highlight, slashVisible.length - 1)];
+        if (entry !== undefined) {
+          acceptSlash(entry);
         }
+        return;
       }
-      if (key === "Escape") {
+      if (intent === "dismiss") {
         native.preventDefault?.();
         setSlashDismissed(true);
         return;
@@ -407,14 +426,15 @@ export function Composer(props: {
       submitOnEnter,
       running: props.running,
       sending: props.sending,
+      stopping: props.stopping,
       canCycleMode: (props.modes?.list.length ?? 0) > 1,
     });
     if (intent === "submit-default") {
       native.preventDefault?.();
-      props.onSubmit("default");
+      submit("default");
     } else if (intent === "submit-alternate") {
       native.preventDefault?.();
-      props.onSubmit("alternate");
+      submit("alternate");
     } else if (intent === "interrupt") {
       native.preventDefault?.();
       props.onStop();
@@ -431,7 +451,19 @@ export function Composer(props: {
 
   function onChangeText(text: string): void {
     setSlashDismissed(false);
+    setAttachError(null);
     props.onChange(text);
+  }
+
+  // A stale image-attachment error clears on the next submit / image removal.
+  function submit(kind: SubmitKind): void {
+    setAttachError(null);
+    props.onSubmit(kind);
+  }
+
+  function removeImage(id: string): void {
+    setAttachError(null);
+    props.onRemoveImage(id);
   }
 
   function onSelectionChange(event: SelectionEvent): void {
@@ -478,6 +510,7 @@ export function Composer(props: {
                 key={message.id}
                 palette={palette}
                 message={message}
+                disabled={props.sending}
                 onEdit={function edit() {
                   props.onEditQueued(message);
                 }}
@@ -500,7 +533,7 @@ export function Composer(props: {
         {popoverOpen ? (
           <SlashPopover
             palette={palette}
-            entries={slashEntries}
+            entries={slashVisible}
             highlight={highlight}
             onPick={acceptSlash}
           />
@@ -543,7 +576,7 @@ export function Composer(props: {
             <AttachmentTray
               palette={palette}
               images={props.images}
-              onRemove={props.onRemoveImage}
+              onRemove={removeImage}
             />
           ) : null}
 
@@ -683,7 +716,6 @@ export function Composer(props: {
             <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
               {props.usage !== null ? (
                 <ContextMeter
-                  theme={props.theme}
                   palette={palette}
                   used={props.usage.used}
                   max={props.usage.max}
@@ -714,7 +746,7 @@ export function Composer(props: {
                     if (props.sending) {
                       props.onStop();
                     } else {
-                      props.onSubmit("default");
+                      submit("default");
                     }
                   }}
                 >

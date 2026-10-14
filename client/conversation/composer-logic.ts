@@ -4,7 +4,7 @@
  * bounds, slash-command matching and mode cycling.
  * No React, no DOM, no async arrows (Hermes).
  */
-import { searchEntries } from "../../shared/model-search";
+import { fuzzyScore } from "../../shared/model-search";
 import { imagesOption, type ComposerImage } from "./composer-images";
 import type { AgentHandle } from "./use-conversation";
 
@@ -33,6 +33,8 @@ export type KeyIntent =
   | "cycle-mode"
   | "newline"
   | "none";
+
+export type PopoverKeyIntent = "down" | "up" | "accept" | "dismiss" | "none";
 
 /** Paseo: Boolean(e.isComposing) || 229 === e.keyCode. */
 export function isImeComposing(e: KeyInfo): boolean {
@@ -92,17 +94,24 @@ export function primaryAction(state: {
 
 /**
  * Key handling for the composer input. The caller only reaches this when the
- * autocomplete popover is closed. `submitOnEnter` is web && !compact.
+ * autocomplete popover is closed. `submitOnEnter` is web && !compact. `stopping`
+ * suppresses a second interrupt while a stop request is still in flight.
  */
 export function keyIntent(
   e: KeyInfo,
-  ctx: { submitOnEnter: boolean; running: boolean; sending: boolean; canCycleMode: boolean },
+  ctx: {
+    submitOnEnter: boolean;
+    running: boolean;
+    sending: boolean;
+    stopping: boolean;
+    canCycleMode: boolean;
+  },
 ): KeyIntent {
   if (isImeComposing(e)) {
     return "none";
   }
   if (e.key === "Escape") {
-    return ctx.running ? "interrupt" : "none";
+    return ctx.running && !ctx.stopping ? "interrupt" : "none";
   }
   if (e.key === "Tab" && e.shiftKey === true) {
     return ctx.canCycleMode ? "cycle-mode" : "none";
@@ -117,6 +126,38 @@ export function keyIntent(
     return ctx.running ? "submit-alternate" : "submit-default";
   }
   return "submit-default";
+}
+
+/**
+ * Key handling while the slash popover is open (checked before keyIntent,
+ * after the caller's IME gate). Plain Enter and Tab accept the highlight,
+ * Escape dismisses; modified Enter falls through to normal submit handling.
+ */
+export function popoverKeyIntent(e: KeyInfo): PopoverKeyIntent {
+  if (isImeComposing(e)) {
+    return "none";
+  }
+  if (e.key === "ArrowDown") {
+    return "down";
+  }
+  if (e.key === "ArrowUp") {
+    return "up";
+  }
+  if (e.key === "Escape") {
+    return "dismiss";
+  }
+  if (e.key === "Tab") {
+    return "accept";
+  }
+  if (
+    e.key === "Enter" &&
+    e.shiftKey !== true &&
+    e.metaKey !== true &&
+    e.ctrlKey !== true
+  ) {
+    return "accept";
+  }
+  return "none";
 }
 
 export function composerMinHeight(isWeb: boolean): number {
@@ -233,6 +274,7 @@ export function restoredDraft(current: string, failed: string): string {
 
 export type SlashCommandEntry = {
   name: string;
+  aliases: readonly string[];
   description: string;
   argumentHint: string;
   kind: "command" | "skill" | null;
@@ -241,34 +283,60 @@ export type SlashCommandEntry = {
 
 type CommandsResult = Awaited<ReturnType<AgentHandle["commands"]>>;
 
+/** Paseo's builtin exit carries aliases quit/q and executes immediately. */
 const EXIT_ENTRY: SlashCommandEntry = {
   name: "exit",
+  aliases: ["quit", "q"],
   description: "归档此会话",
   argumentHint: "",
   kind: "command",
   source: "builtin",
 };
 
+const BUILTIN_NAMES = new Set([EXIT_ENTRY.name, ...EXIT_ENTRY.aliases]);
+
 /**
  * The completion list shown at position "start": builtin /exit first, then
- * every provider command. Inline matches only offer provider skills, like
- * Paseo's filterInlineSkillCommandEntries. Returns null when the provider
- * could not answer (result.error), which also hides the popover.
+ * every provider command. Provider entries colliding with the builtin name or
+ * its aliases are dropped, like Paseo's mergeSlashCommandSources. Inline
+ * matches only offer provider skills. Returns null when the provider could
+ * not answer (result.error), which also hides the popover.
  */
 export function buildSlashEntries(result: CommandsResult): SlashCommandEntry[] | null {
   if (typeof result.error === "string" && result.error !== "") {
     return null;
   }
-  const provider = (result.commands ?? []).map(function toEntry(command) {
-    return {
-      name: command.name,
-      description: command.description,
-      argumentHint: command.argumentHint,
-      kind: command.kind === "skill" ? ("skill" as const) : ("command" as const),
-      source: "provider" as const,
-    };
-  });
+  const provider = (result.commands ?? [])
+    .filter(function ownName(command) {
+      return !BUILTIN_NAMES.has(command.name);
+    })
+    .map(function toEntry(command) {
+      return {
+        name: command.name,
+        aliases: [] as readonly string[],
+        description: command.description,
+        argumentHint: command.argumentHint,
+        kind: command.kind === "skill" ? ("skill" as const) : ("command" as const),
+        source: "provider" as const,
+      };
+    });
   return [EXIT_ENTRY, ...provider];
+}
+
+/**
+ * Paseo scores only the command name and aliases (scoreTextFields), never the
+ * description — a long description must not let an unrelated command win.
+ * Returns the best score, or -1 when nothing matches.
+ */
+function slashScore(query: string, entry: SlashCommandEntry): number {
+  let best = fuzzyScore(query, entry.name);
+  for (const alias of entry.aliases) {
+    const score = fuzzyScore(query, alias);
+    if (score > best) {
+      best = score;
+    }
+  }
+  return best;
 }
 
 /** Filters the entry list by match position and ranks it against the query. */
@@ -282,13 +350,25 @@ export function rankSlashEntries(
       : entries.filter(function onlySkills(entry) {
           return entry.source === "provider" && entry.kind === "skill";
         });
-  return searchEntries(
-    candidates.map(function toSearch(entry) {
-      return { ...entry, id: entry.name, label: `/${entry.name}`, provider: entry.description };
-    }),
-    match.query,
-  );
+  const scored = candidates.map(function score(entry) {
+    return { entry, score: slashScore(match.query, entry) };
+  });
+  // Stable sort: equal scores (and the empty query) keep the source order,
+  // so the builtin /exit stays on top.
+  scored.sort(function compare(left, right) {
+    return right.score - left.score;
+  });
+  return scored
+    .filter(function matched(item) {
+      return item.score >= 0;
+    })
+    .map(function unwrap(item) {
+      return item.entry;
+    });
 }
+
+/** Only the first rows are rendered and reachable through the keyboard. */
+export const SLASH_VISIBLE_LIMIT = 30;
 
 export type SendImages = NonNullable<ReturnType<typeof imagesOption>["images"]>;
 
@@ -319,7 +399,9 @@ const EXIT_COMMANDS = new Set(["/exit", "/quit", "/q"]);
 /**
  * The submit pipeline behind the composer's Enter / send button / "立即发送".
  * `held` is the synchronous double-submit guard (submittingRef semantics):
- * set before the first await, reset in finally.
+ * set before the first await, reset in finally. `archiveNow` is the immediate
+ * builtin-exit path — selecting /exit (or its aliases) in the popover archives
+ * right away instead of first rewriting the draft.
  */
 export function createComposerSubmitter(effects: ComposerSubmitEffects): {
   submit(input: ComposerSubmitInput): Promise<SubmitOutcome>;
@@ -328,8 +410,22 @@ export function createComposerSubmitter(effects: ComposerSubmitEffects): {
     images: readonly ComposerImage[];
     activeTurnBehavior: ActiveTurnBehavior;
   }): Promise<"sent" | "none">;
+  archiveNow(): Promise<SubmitOutcome>;
 } {
   let held = false;
+  async function archiveNow(): Promise<SubmitOutcome> {
+    if (held) {
+      return "none";
+    }
+    held = true;
+    try {
+      effects.clearInput();
+      await effects.archive();
+      return "archived";
+    } finally {
+      held = false;
+    }
+  }
   return {
     async submit(input: ComposerSubmitInput): Promise<SubmitOutcome> {
       if (held) {
@@ -341,14 +437,7 @@ export function createComposerSubmitter(effects: ComposerSubmitEffects): {
         return "none";
       }
       if (images.length === 0 && EXIT_COMMANDS.has(text)) {
-        held = true;
-        try {
-          effects.clearInput();
-          await effects.archive();
-          return "archived";
-        } finally {
-          held = false;
-        }
+        return archiveNow();
       }
       const behavior = resolveActiveSendBehavior(input.behavior, input.hasPendingPermission);
       const decision = decideSubmit(input.kind, behavior, input.running);
@@ -390,5 +479,33 @@ export function createComposerSubmitter(effects: ComposerSubmitEffects): {
         held = false;
       }
     },
+    archiveNow,
   };
+}
+
+/**
+ * Paseo resolveAgentModelSelection order: runtime (effective) option first,
+ * then the explicit option unless it is the "default" sentinel, then the
+ * model's defaultThinkingOptionId, finally the first available option.
+ */
+export function resolveThinkingOptionId(
+  snapshot: {
+    effectiveThinkingOptionId?: string | null;
+    thinkingOptionId?: string | null;
+  },
+  modelDefault: string | null,
+  options: readonly { id: string }[],
+): string | null {
+  const effective = snapshot.effectiveThinkingOptionId ?? null;
+  if (effective !== null && effective !== "default") {
+    return effective;
+  }
+  const explicit = snapshot.thinkingOptionId ?? null;
+  if (explicit !== null && explicit !== "default") {
+    return explicit;
+  }
+  if (modelDefault !== null) {
+    return modelDefault;
+  }
+  return options[0]?.id ?? null;
 }

@@ -30,6 +30,7 @@ import {
   buildSlashEntries,
   createComposerSubmitter,
   resolveActiveSendBehavior,
+  resolveThinkingOptionId,
   restoredDraft,
   turnBehaviorFor,
   type SlashCommandEntry,
@@ -40,6 +41,7 @@ import { isNearBottom } from "./model";
 import { modelCatalogFor } from "./model-catalog";
 import { readPaseoSendBehavior } from "../paseo-app-settings";
 import {
+  clearQueue,
   enqueueMessage,
   requeueFront,
   takeQueuedMessage,
@@ -73,6 +75,8 @@ export function ConversationPane(props: {
   const [images, setImages] = useState<readonly ComposerImage[]>([]);
   const queued = useQueuedMessages(sessionId);
   const [sending, setSending] = useState(false);
+  // Synchronous in-flight guard for every send path (state lags a render).
+  const sendingRef = useRef(false);
   const [stopping, setStopping] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [modePending, setModePending] = useState(false);
@@ -130,9 +134,12 @@ export function ConversationPane(props: {
       void invalidateBoard();
       // "synced-idle" trigger: the timeline just loaded; if the agent is idle
       // the drain sends the queue head (its own pre-send recheck applies).
-      nudgeQueueDrain(sessionId);
+      // Never nudge an archived session — sending would unarchive it.
+      if (liveness !== "archived") {
+        nudgeQueueDrain(sessionId);
+      }
     },
-    [conversation.loading, conversation.error, invalidateBoard, sessionId],
+    [conversation.loading, conversation.error, invalidateBoard, sessionId, liveness],
   );
 
   // The drain observation only runs while a queue is non-empty; opening a
@@ -187,11 +194,12 @@ export function ConversationPane(props: {
   }
 
   async function submit(kind: SubmitKind): Promise<void> {
-    if (liveness === "archived") {
+    if (liveness === "archived" || sendingRef.current) {
       return;
     }
     const failed = { text: draft, images };
     setSendError(null);
+    sendingRef.current = true;
     setSending(true);
     try {
       const outcome = await submitter.submit({
@@ -206,6 +214,9 @@ export function ConversationPane(props: {
         jumpToBottom();
         await Promise.all([conversation.refreshAgent(), invalidateBoard()]);
       } else if (outcome === "archived") {
+        // /exit archived the session; its queue is dead weight now.
+        clearQueue(sessionId);
+        ensureQueueDrain(paseo);
         await invalidateBoard();
       }
     } catch {
@@ -215,6 +226,7 @@ export function ConversationPane(props: {
       });
       setSendError("发送消息失败");
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }
@@ -230,11 +242,16 @@ export function ConversationPane(props: {
   }
 
   async function sendQueuedNow(message: QueuedMessage): Promise<void> {
+    // A submit is in flight: leave the entry in place and `sending` alone.
+    if (sendingRef.current) {
+      return;
+    }
     const taken = takeQueuedMessage(sessionId, message.id);
     if (taken === null) {
       return;
     }
     setSendError(null);
+    sendingRef.current = true;
     setSending(true);
     try {
       const behavior = turnBehaviorFor(
@@ -255,11 +272,43 @@ export function ConversationPane(props: {
       requeueFront(sessionId, taken);
       setSendError("发送消息失败");
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }
 
+  // The builtin /exit entry in the popover archives immediately (Paseo's
+  // execution:"immediate") instead of rewriting the draft first.
+  async function archiveNow(): Promise<void> {
+    if (liveness === "archived" || sendingRef.current) {
+      return;
+    }
+    setSendError(null);
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const outcome = await submitter.archiveNow();
+      if (outcome === "archived") {
+        clearQueue(sessionId);
+        ensureQueueDrain(paseo);
+        await invalidateBoard();
+      }
+    } catch {
+      setSendError("发送消息失败");
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }
+
+  // Synchronous guard: a second Esc/stop while the RPC is still in flight is
+  // dropped (the button is disabled via `stopping`, the keyboard path is not).
+  const stoppingRef = useRef(false);
   async function stop(): Promise<void> {
+    if (stoppingRef.current) {
+      return;
+    }
+    stoppingRef.current = true;
     setStopping(true);
     try {
       const result = await stopCall({ sessionId });
@@ -270,6 +319,7 @@ export function ConversationPane(props: {
     } catch (error) {
       toast.error(`停止失败：${errorText(error)}`);
     } finally {
+      stoppingRef.current = false;
       setStopping(false);
     }
   }
@@ -295,22 +345,32 @@ export function ConversationPane(props: {
   }
 
   // Slash commands: fetched lazily the first time the draft has an active
-  // "/"; the result is cached for the lifetime of this pane.
+  // "/"; a failed request retries (with a cooldown) on the next slash typing.
   const [slashCommands, setSlashCommands] = useState<readonly SlashCommandEntry[] | null>(null);
-  const slashRequested = useRef(false);
+  const slashLoaded = useRef(false);
+  const slashLastTry = useRef(0);
   const onSlashNeeded = useCallback(
     function onSlashNeeded(): void {
-      if (slashRequested.current || liveness === "archived") {
+      if (slashLoaded.current || liveness === "archived") {
         return;
       }
-      slashRequested.current = true;
+      const now = Date.now();
+      if (now - slashLastTry.current < 3_000) {
+        return;
+      }
+      slashLastTry.current = now;
       handle
         .commands()
         .then(function loaded(result) {
-          setSlashCommands(buildSlashEntries(result));
+          const entries = buildSlashEntries(result);
+          if (entries === null) {
+            return;
+          }
+          slashLoaded.current = true;
+          setSlashCommands(entries);
         })
         .catch(function failed() {
-          setSlashCommands(null);
+          // Stays unloaded; the next slash keystroke retries after cooldown.
         });
     },
     [handle, liveness],
@@ -322,6 +382,7 @@ export function ConversationPane(props: {
   const [thinkingOptions, setThinkingOptions] = useState<
     readonly { id: string; label: string }[] | null
   >(null);
+  const [thinkingDefaultId, setThinkingDefaultId] = useState<string | null>(null);
   const provider = agent.provider;
   const model = agent.model;
   useEffect(
@@ -329,6 +390,7 @@ export function ConversationPane(props: {
       if (provider === null || model === null) {
         setModelLabel(null);
         setThinkingOptions(null);
+        setThinkingDefaultId(null);
         return undefined;
       }
       let dead = false;
@@ -342,6 +404,7 @@ export function ConversationPane(props: {
           }) ?? null;
         setModelLabel(entry?.label ?? model);
         setThinkingOptions(entry?.thinkingOptions ?? null);
+        setThinkingDefaultId(entry?.defaultThinkingOptionId ?? null);
       });
       return function drop() {
         dead = true;
@@ -552,6 +615,9 @@ export function ConversationPane(props: {
             onSubmit={function onSubmit(kind) {
               void submit(kind);
             }}
+            onArchive={function onArchive() {
+              void archiveNow();
+            }}
             onStop={function onStop() {
               void stop();
             }}
@@ -562,7 +628,14 @@ export function ConversationPane(props: {
               thinkingOptions !== null && thinkingOptions.length > 0
                 ? {
                     options: thinkingOptions,
-                    currentId: agent.thinkingOptionId,
+                    currentId: resolveThinkingOptionId(
+                      {
+                        effectiveThinkingOptionId: agent.effectiveThinkingOptionId,
+                        thinkingOptionId: agent.thinkingOptionId,
+                      },
+                      thinkingDefaultId,
+                      thinkingOptions,
+                    ),
                     pending: thinkingPending,
                     onSelect(id) {
                       void selectThinking(id);

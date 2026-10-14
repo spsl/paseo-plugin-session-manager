@@ -1,13 +1,13 @@
 /**
  * Slash-command completion popover above the composer frame: one row per
  * command showing `/name argumentHint` with the description below; the
- * highlighted row uses surface2.
+ * highlighted row uses surface2. `entries` arrives already truncated to what
+ * the keyboard can reach (SLASH_VISIBLE_LIMIT), so rendering matches
+ * navigation exactly.
  */
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { SlashCommandEntry } from "./composer-logic";
 import type { ComposerPalette } from "./composer-tokens";
-
-const MAX_ROWS = 30;
 
 export function SlashPopover(props: {
   palette: ComposerPalette;
@@ -38,7 +38,7 @@ export function SlashPopover(props: {
         contentContainerStyle={{ gap: 2 }}
         keyboardShouldPersistTaps="always"
       >
-      {props.entries.slice(0, MAX_ROWS).map(function renderEntry(entry, index) {
+      {props.entries.map(function renderEntry(entry, index) {
         const active = index === props.highlight;
         return (
           <Pressable

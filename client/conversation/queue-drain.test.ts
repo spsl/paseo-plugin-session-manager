@@ -9,6 +9,7 @@ type FakeHandlers = {
 type FakeHandle = {
   status: string;
   activeTurn: unknown;
+  archivedAt: string | null;
   refresh: ReturnType<typeof vi.fn>;
   send: ReturnType<typeof vi.fn>;
 };
@@ -19,6 +20,7 @@ function setup() {
   const handle: FakeHandle = {
     status: "idle",
     activeTurn: null,
+    archivedAt: null,
     refresh: vi.fn(async function refresh() {
       const next = scripted.shift();
       if (next !== undefined) {
@@ -255,6 +257,69 @@ describe("queue drain", () => {
       activeTurnBehavior: "steer",
       images: [{ data: "QUJD", mimeType: "image/png" }],
     });
+  });
+
+  it("a run shorter than the debounce window still drains the next message", async () => {
+    const { handle, paseo, handlersBox } = setup();
+    const queue = await import("./queue");
+    const drain = await import("./queue-drain");
+    queue.enqueueMessage("s10", { text: "A", images: [] });
+    queue.enqueueMessage("s10", { text: "B", images: [] });
+    drain.markQueuedWhileRunning("s10");
+    drain.ensureQueueDrain(paseo as never);
+    await tick(10);
+
+    handle.status = "idle";
+    handlersBox.handlers?.update({ type: "agent_update" });
+    await tick(300);
+    expect(handle.send).toHaveBeenCalledTimes(1);
+    expect(queue.queueFor("s10").map((m) => m.text)).toEqual(["B"]);
+
+    // The A-turn started and finished inside one debounce window: the only
+    // observation still reads "idle", but the successful send marked the
+    // record running, so this idle drains B instead of stalling forever.
+    handlersBox.handlers?.update({ type: "agent_update" });
+    await tick(300);
+    expect(handle.send).toHaveBeenCalledTimes(2);
+    expect(handle.send).toHaveBeenLastCalledWith("B", { activeTurnBehavior: "steer" });
+    expect(queue.queueFor("s10")).toHaveLength(0);
+  });
+
+  it("never sends to an archived agent and drops its queue", async () => {
+    const { handle, paseo, handlersBox } = setup();
+    const queue = await import("./queue");
+    const drain = await import("./queue-drain");
+    queue.enqueueMessage("s11", { text: "一", images: [] });
+    queue.enqueueMessage("s11", { text: "二", images: [] });
+    drain.ensureQueueDrain(paseo as never);
+    await tick(10);
+
+    // User archives the agent while it runs: daemon stops the turn and sets
+    // archivedAt. The resulting "stopped" observation must not send.
+    handle.status = "running";
+    handlersBox.handlers?.update({ type: "agent_update" });
+    await tick(300);
+    handle.status = "closed";
+    handle.archivedAt = "2026-10-13T00:00:00Z";
+    handlersBox.handlers?.update({ type: "agent_update" });
+    await tick(300);
+    expect(handle.send).not.toHaveBeenCalled();
+    expect(queue.queueFor("s11")).toHaveLength(0);
+  });
+
+  it("a nudge on an archived session drops the queue without sending", async () => {
+    const { handle, paseo } = setup();
+    const queue = await import("./queue");
+    const drain = await import("./queue-drain");
+    queue.enqueueMessage("s12", { text: "x", images: [] });
+    drain.ensureQueueDrain(paseo as never);
+    await tick(10);
+
+    handle.archivedAt = "2026-10-13T00:00:00Z";
+    drain.nudgeQueueDrain("s12");
+    await tick(10);
+    expect(handle.send).not.toHaveBeenCalled();
+    expect(queue.queueFor("s12")).toHaveLength(0);
   });
 
   it("releases the observation once every queue is empty", async () => {

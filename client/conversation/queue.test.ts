@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  clearQueue,
   enqueueMessage,
   queueFor,
   queuedSessionIds,
@@ -42,5 +43,24 @@ describe("composer queue", () => {
     expect(listener).toHaveBeenCalledTimes(1);
     takeQueuedMessage(sid, queueFor(sid)[0].id);
     takeQueuedMessage(sid, queueFor(sid)[0].id);
+  });
+
+  it("clearQueue drops the whole queue and notifies", () => {
+    const sid = "t-queue-3";
+    const listener = vi.fn();
+    const off = subscribeQueue(listener);
+    enqueueMessage(sid, { text: "x", images: [] });
+    enqueueMessage(sid, { text: "y", images: [] });
+    listener.mockClear();
+
+    clearQueue(sid);
+    expect(queueFor(sid)).toHaveLength(0);
+    expect(queuedSessionIds()).not.toContain(sid);
+    expect(listener).toHaveBeenCalledWith(sid);
+
+    listener.mockClear();
+    clearQueue(sid);
+    expect(listener).not.toHaveBeenCalled();
+    off();
   });
 });

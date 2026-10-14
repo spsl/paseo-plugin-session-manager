@@ -15,6 +15,43 @@ export type OptionChoice = { id: string; label: string; icon?: string };
 
 export type ControlKind = "thinking" | "mode";
 
+/**
+ * Icon names provably present in the host's icon component (the Shield
+ * family the daemon emits for modes plus every name this plugin renders).
+ * Unknown provider names fall back to Shield, per the design contract.
+ */
+const KNOWN_ICONS = new Set([
+  "AppWindow",
+  "ArrowUp",
+  "Brain",
+  "Check",
+  "ChevronDown",
+  "CircleAlert",
+  "ImagePlus",
+  "Kanban",
+  "Pencil",
+  "Plus",
+  "Search",
+  "Settings",
+  "Shield",
+  "ShieldCheck",
+  "ShieldEllipsis",
+  "ShieldOff",
+  "Timer",
+  "TimerOff",
+  "X",
+]);
+
+/** Mode anchor icon: unknown provider names degrade to Shield. */
+export function modeIcon(icon: string | undefined): string {
+  return icon !== undefined && KNOWN_ICONS.has(icon) ? icon : "Shield";
+}
+
+/** Menu row icon: unknown names show no icon, like Paseo. */
+export function menuIcon(icon: string | undefined): string | undefined {
+  return icon !== undefined && KNOWN_ICONS.has(icon) ? icon : undefined;
+}
+
 function AnchorButton(props: {
   palette: ComposerPalette;
   icon?: string;
@@ -53,7 +90,7 @@ function AnchorButton(props: {
         <Icon name={props.icon} size={14} color={palette.foregroundMuted} />
       ) : null}
       {props.label !== undefined ? (
-        <Text style={{ color: palette.foregroundMuted, fontSize: 13 }}>{props.label}</Text>
+        <Text style={{ color: palette.foregroundMuted, fontSize: 14 }}>{props.label}</Text>
       ) : null}
       {props.pending ? (
         <ActivityIndicator size={10} color={palette.foregroundMuted} />
@@ -90,7 +127,7 @@ export function AgentControls(props: {
       return {
         id: option.id,
         label: option.label,
-        icon: option.icon,
+        icon: menuIcon(option.icon),
         selected: option.id === currentId,
       };
     });
@@ -110,7 +147,7 @@ export function AgentControls(props: {
     <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
       {props.modelLabel !== null ? (
         <View style={{ height: 28, justifyContent: "center", paddingHorizontal: 8 }}>
-          <Text style={{ color: palette.foregroundMuted, fontSize: 13 }} numberOfLines={1}>
+          <Text style={{ color: palette.foregroundMuted, fontSize: 14 }} numberOfLines={1}>
             {props.modelLabel}
           </Text>
         </View>
@@ -151,7 +188,7 @@ export function AgentControls(props: {
         <View style={{ position: "relative" }}>
           <AnchorButton
             palette={palette}
-            icon={modeCurrent?.icon ?? "Shield"}
+            icon={modeIcon(modeCurrent?.icon)}
             label={props.condensed >= 2 ? undefined : (modeCurrent?.label ?? "模式")}
             chevron={props.condensed === 0}
             pending={props.modes.pending}
