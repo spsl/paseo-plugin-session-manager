@@ -7,7 +7,6 @@ import {
   mergeStreamEvent,
   prependOlder,
   splitFences,
-  steerText,
   stateFromFetch,
   toolBody,
   toolSummary,
@@ -198,14 +197,6 @@ describe("permissions", () => {
   });
 });
 
-describe("steerText", () => {
-  it("marks the message as a supplement to the running task", () => {
-    expect(steerText("顺便把测试也跑一下")).toBe(
-      "[追加说明] 这是对当前任务的补充，不是替换：继续完成原目标，在本轮最终回复中一并体现，不要单独确认。\n顺便把测试也跑一下",
-    );
-  });
-});
-
 describe("liveActivity", () => {
   const user = (text: string): Row => ({ kind: "user", key: text, text, messageId: null });
   const tool = (command: string): Row => ({
@@ -218,8 +209,8 @@ describe("liveActivity", () => {
     error: null,
   });
 
-  it("reads the latest user message, steer prefix removed, and the latest tool", () => {
-    const rows = [user("旧任务"), tool("ls"), user(steerText("再加一个测试")), tool("npm test")];
+  it("reads the latest user message and the latest tool", () => {
+    const rows = [user("旧任务"), tool("ls"), user("再加一个测试"), tool("npm test")];
     expect(liveActivity(rows)).toEqual({
       userText: "再加一个测试",
       activity: "Bash：npm test",

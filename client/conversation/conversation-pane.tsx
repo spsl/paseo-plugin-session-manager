@@ -37,7 +37,7 @@ import {
   type SubmitKind,
 } from "./composer-logic";
 import { cachedDraft, useComposerDraft } from "./drafts";
-import { isNearBottom, steerText } from "./model";
+import { isNearBottom } from "./model";
 import { modelCatalogFor } from "./model-catalog";
 import { readPaseoSendBehavior } from "../paseo-app-settings";
 import {
@@ -111,11 +111,7 @@ export function ConversationPane(props: {
           markQueuedWhileRunning(sessionId);
         },
         sendMessage(text, options) {
-          // Steered turns carry the 追加说明 prefix (same as the board card).
-          return handle.send(
-            options.activeTurnBehavior === "steer" ? steerText(text) : text,
-            options,
-          );
+          return handle.send(text, options);
         },
         archive() {
           return handle.archive().then(function done() {

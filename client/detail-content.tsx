@@ -26,7 +26,6 @@ import {
   type Turn,
 } from "../shared/types";
 import { Badge, Chip } from "./badge";
-import { withoutSteerPrefix } from "./conversation/model";
 import { Markdown } from "./markdown/markdown";
 import { declaredTone, errorText, formatDateTime, statusTone } from "./styles";
 import { SNAPSHOT_QUERY_KEY, useSessionActions } from "./use-snapshot";
@@ -109,7 +108,7 @@ function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
           {formatStepTime(turn.completedAt, Date.now())}
         </Text>
         <Text style={{ flex: 1, color: colors.foreground, fontSize: 12 }} numberOfLines={1}>
-          {firstLine(turn.userInput === null ? null : withoutSteerPrefix(turn.userInput), 300) ??
+          {firstLine(turn.userInput, 300) ??
             "未采集到该轮输入"}
         </Text>
         {mark ? (

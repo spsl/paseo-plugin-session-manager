@@ -15,7 +15,6 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { watchAgents } from "../agents-watch";
 import { imagesOption } from "./composer-images";
-import { steerText } from "./model";
 import { clearQueue, queueFor, queuedSessionIds, requeueFront, takeQueuedMessage } from "./queue";
 
 type Paseo = PluginClientContext["paseo"];
@@ -227,7 +226,7 @@ async function sendNext(sessionId: string): Promise<void> {
       return;
     }
     try {
-      await record.handle.send(steerText(message.text), {
+      await record.handle.send(message.text, {
         activeTurnBehavior: "steer",
         ...imagesOption(message.images),
       });
