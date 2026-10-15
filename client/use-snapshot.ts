@@ -16,7 +16,10 @@ import {
   dismissResumeRpc,
   forgetRpc,
   reanalyzeRpc,
+  reopenRpc,
   resumeRpc,
+  reviewDismissRpc,
+  reviewRequestRpc,
   setManualStatusRpc,
   snapshotRpc,
 } from "../shared/rpc";
@@ -30,6 +33,7 @@ import {
   patchForget,
   patchManualStatus,
   patchReanalyze,
+  patchReopen,
   patchResume,
   pollIntervalFor,
 } from "./board-model";
@@ -116,6 +120,10 @@ export type SessionActions = {
   forget(sessionId: string): Promise<boolean>;
   resume(sessionId: string): Promise<boolean>;
   dismissResume(sessionId: string): Promise<boolean>;
+  reopen(sessionId: string): Promise<boolean>;
+  /** Sends the (possibly user-edited) review request into the session. */
+  requestReview(sessionId: string, text: string): Promise<boolean>;
+  dismissReview(sessionId: string): Promise<boolean>;
 };
 
 export function useSessionActions(): SessionActions {
@@ -130,6 +138,9 @@ export function useSessionActions(): SessionActions {
   const forgetCall = useRpc(forgetRpc);
   const resumeCall = useRpc(resumeRpc);
   const dismissResumeCall = useRpc(dismissResumeRpc);
+  const reopenCall = useRpc(reopenRpc);
+  const reviewRequestCall = useRpc(reviewRequestRpc);
+  const reviewDismissCall = useRpc(reviewDismissRpc);
 
   const run = useCallback(
     async function run(
@@ -262,6 +273,28 @@ export function useSessionActions(): SessionActions {
             },
           );
         },
+        reopen(sessionId) {
+          return run(
+            sessionId,
+            "重新打开失败",
+            function optimistic(snapshot) {
+              return patchReopen(snapshot, sessionId);
+            },
+            function call() {
+              return reopenCall({ sessionId });
+            },
+          );
+        },
+        requestReview(sessionId, text) {
+          return run(sessionId, "发送审查请求失败", null, function call() {
+            return reviewRequestCall({ sessionId, text });
+          });
+        },
+        dismissReview(sessionId) {
+          return run(sessionId, "忽略建议失败", null, function call() {
+            return reviewDismissCall({ sessionId });
+          });
+        },
       };
     },
     [
@@ -275,6 +308,9 @@ export function useSessionActions(): SessionActions {
       forgetCall,
       resumeCall,
       dismissResumeCall,
+      reopenCall,
+      reviewRequestCall,
+      reviewDismissCall,
     ],
   );
 }

@@ -10,10 +10,17 @@ import {
   formatDeferUntil,
   formatShortTimeAgo,
   resumeStateLabel,
+  reviewBadgeLabel,
+  reviewBadgeTone,
   sessionTitle,
   workspaceLabel,
 } from "../shared/presentation";
-import { DECLARED_KIND_LABELS, isActiveLiveness, type SessionView } from "../shared/types";
+import {
+  DECLARED_KIND_LABELS,
+  isActiveLiveness,
+  type ReviewPhase,
+  type SessionView,
+} from "../shared/types";
 import { Badge } from "./badge";
 import { countSubagents, EMPTY_SUBAGENTS, isDeferred, subagentStatusOf } from "./board-model";
 import { columnTone, declaredTone, toneBackground, withAlpha } from "./styles";
@@ -35,11 +42,29 @@ type Props = {
   onDefer?(session: SessionView): void;
   /** Resumes a deferred session immediately. */
   onResume?(session: SessionView): void;
+  /** Reopens a closed session; rendered for cards in the closed column. */
+  onReopen?(session: SessionView): void;
 };
+
+/** Badge tone per review phase. */
+function reviewTone(theme: PluginTheme, phase: ReviewPhase): string {
+  const { colors } = theme;
+  switch (reviewBadgeTone(phase)) {
+    case "accent":
+      return colors.accent;
+    case "warning":
+      return colors.statusWarning;
+    case "danger":
+      return colors.statusDanger;
+    default:
+      return colors.foregroundMuted;
+  }
+}
 
 function SessionCardView(props: Props) {
   const { session, theme, now } = props;
   const { colors } = theme;
+  const review = session.review;
   const branch = branchLabel(session);
   const nextStep = firstLine(session.analysis?.nextSteps[0], 120);
   const summary = firstLine(session.analysis?.summary, 160);
@@ -80,7 +105,7 @@ function SessionCardView(props: Props) {
           flexDirection: "row",
           alignItems: "center",
           gap: 6,
-          paddingRight: props.onDefer || props.onResume ? 22 : 0,
+          paddingRight: props.onDefer || props.onResume || props.onReopen ? 22 : 0,
         }}
       >
         <Text
@@ -177,6 +202,12 @@ function SessionCardView(props: Props) {
         {attention ? <Badge theme={theme} label="需要人工介入" tone={colors.statusWarning} /> : null}
         {session.pendingPermissionCount > 0 ? (
           <Badge theme={theme} label="待授权" tone={colors.statusWarning} />
+        ) : null}
+        {review !== null ? (
+          <Badge theme={theme} label={reviewBadgeLabel(review)} tone={reviewTone(theme, review.phase)} />
+        ) : null}
+        {review?.editedDuringVerify === true ? (
+          <Badge theme={theme} label="复核时改了代码" tone={colors.statusDanger} />
         ) : null}
         {session.parentAgentId ? (
           <Badge theme={theme} label="子 Agent" tone={colors.foregroundMuted} />
@@ -351,7 +382,7 @@ function SessionCardView(props: Props) {
           <Icon name="TimerOff" size={14} color={colors.foregroundMuted} />
         </Pressable>
       ) : null}
-      {!deferred && props.onDefer ? (
+      {!deferred && props.onDefer && isActiveLiveness(session.liveness) ? (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="延迟显示"
@@ -362,6 +393,28 @@ function SessionCardView(props: Props) {
           style={{ position: "absolute", top: 6, right: 6, zIndex: 2, elevation: 2, padding: 4 }}
         >
           <Icon name="Timer" size={14} color={colors.foregroundMuted} />
+        </Pressable>
+      ) : null}
+      {!isActiveLiveness(session.liveness) && props.onReopen ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="重新打开"
+          hitSlop={6}
+          disabled={resuming}
+          onPress={function reopen() {
+            props.onReopen?.(session);
+          }}
+          style={{
+            position: "absolute",
+            top: 6,
+            right: 6,
+            zIndex: 2,
+            elevation: 2,
+            padding: 4,
+            opacity: resuming ? 0.4 : 1,
+          }}
+        >
+          <Icon name="RotateCcw" size={14} color={colors.foregroundMuted} />
         </Pressable>
       ) : null}
     </Pressable>

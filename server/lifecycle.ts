@@ -111,6 +111,11 @@ export function newRecord(
     historyBaseTurnId: null,
     labels: {},
     labelsKnown: false,
+    review: null,
+    reviewedThroughTurnId: null,
+    lastReviewHead: null,
+    reviewDismissedTurnId: null,
+    timelineCursor: null,
   };
   if (agent.status !== undefined) {
     applyAgentSnapshot(record, agent, project);

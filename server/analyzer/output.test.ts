@@ -8,6 +8,8 @@ import {
   NOW_MAX_LENGTH,
   SPEECH_MAX_LENGTH,
   STEP_MAX_LENGTH,
+  TURN_DIGEST_MAX_LENGTH,
+  TURN_STEP_MAX_LENGTH,
   speechOf,
   type Analysis
 } from '../../shared/types'
@@ -77,6 +79,18 @@ describe('analyzer output', () => {
     expect(() => parseAnalysis({ ...analysis, now: 1 })).toThrow(/now/)
   })
 
+  it('parses the optional review suggestion and tolerates its absence', () => {
+    const parsed = parseAnalysis({
+      ...analysis,
+      review: { suggested: true, reason: '  改动了核心逻辑  ' }
+    })
+    expect(parsed.review).toEqual({ suggested: true, reason: '改动了核心逻辑' })
+    expect(parseAnalysis(analysis)).not.toHaveProperty('review')
+    expect(() =>
+      parseAnalysis({ ...analysis, review: { suggested: 'yes' } })
+    ).toThrow(/review/)
+  })
+
   it('accepts legacy output without a title by deriving one from the goal', () => {
     const { title: _title, ...legacy } = analysis
     expect(parseAnalysis(legacy)).toMatchObject({ title: '完成需求' })
@@ -106,5 +120,47 @@ describe('analyzer output', () => {
     expect(() => parseAnalysis({ ...analysis, title: 'x'.repeat(49) })).toThrow(
       /title/
     )
+  })
+
+  it('parses turnDigests and clips step/digest to their limits', () => {
+    const parsed = parseAnalysis({
+      ...analysis,
+      turnDigests: [
+        { turnId: ' t1 ', step: '  改完了  ', digest: '做了很多事' },
+        {
+          turnId: 't2',
+          step: 'x'.repeat(TURN_STEP_MAX_LENGTH + 5),
+          digest: 'y'.repeat(TURN_DIGEST_MAX_LENGTH + 5)
+        }
+      ]
+    })
+    expect(parsed.turnDigests).toEqual([
+      { turnId: 't1', step: '改完了', digest: '做了很多事' },
+      {
+        turnId: 't2',
+        step: 'x'.repeat(TURN_STEP_MAX_LENGTH - 1) + '…',
+        digest: 'y'.repeat(TURN_DIGEST_MAX_LENGTH - 1) + '…'
+      }
+    ])
+  })
+
+  it('drops malformed turnDigests entries and tolerates its absence', () => {
+    const parsed = parseAnalysis({
+      ...analysis,
+      turnDigests: [
+        { turnId: 't1', step: '步骤', digest: '摘要' },
+        { turnId: '  ', step: '步骤', digest: '摘要' },
+        { turnId: 't2', step: 3, digest: '摘要' },
+        { turnId: 't3', step: '步骤' },
+        'junk'
+      ]
+    })
+    expect(parsed.turnDigests).toEqual([
+      { turnId: 't1', step: '步骤', digest: '摘要' }
+    ])
+    expect(parseAnalysis(analysis)).not.toHaveProperty('turnDigests')
+    expect(() =>
+      parseAnalysis({ ...analysis, turnDigests: 'nope' })
+    ).toThrow(/turnDigests/)
   })
 })

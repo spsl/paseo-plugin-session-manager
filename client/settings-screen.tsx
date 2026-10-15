@@ -770,6 +770,54 @@ export function SessionManagerSettingsScreen(props: PluginSurfaceProps) {
           />
         </SettingsSection>
 
+        <SettingsSection title="代码审查">
+          <SettingsSelect<string>
+            label="审查建议"
+            hint="任务完成后是否建议追加一次独立代码审查。自动模式下满足条件时直接发起；关闭时不建议也不发起。"
+            value={values?.reviewTrigger ?? "suggest"}
+            options={[
+              { label: "提示（默认）", value: "suggest" },
+              { label: "自动发起", value: "auto" },
+              { label: "关闭", value: "off" },
+            ]}
+            disabled={disabled}
+            onValueChange={function change(value) {
+              if (value === "off" || value === "suggest" || value === "auto") {
+                void save({ reviewTrigger: value });
+              }
+            }}
+          />
+          <SettingsSelect<string>
+            label="审查范围"
+            hint="交给审查子 Agent 的改动范围；上次审查基准在会话成功复核后记录为当时的 HEAD。"
+            value={values?.reviewScope ?? "since_last_review"}
+            options={[
+              { label: "上次审查以来（默认）", value: "since_last_review" },
+              { label: "未提交改动", value: "uncommitted" },
+              { label: "整个会话", value: "session" },
+            ]}
+            disabled={disabled || (values?.reviewTrigger ?? "suggest") === "off"}
+            onValueChange={function change(value) {
+              if (value === "uncommitted" || value === "since_last_review" || value === "session") {
+                void save({ reviewScope: value });
+              }
+            }}
+          />
+          <PromptEditor
+            label="审查请求模板"
+            hint="留空使用内置模板；占位变量 {{scope}}、{{requestId}}、{{baseHead}} 会替换为实际值。"
+            value={values?.reviewPrompt ?? ""}
+            disabled={disabled || (values?.reviewTrigger ?? "suggest") === "off"}
+            theme={theme}
+            compact={layout.compact}
+            placeholder="留空使用内置模板；占位变量 {{scope}}、{{requestId}}、{{baseHead}} 会替换为实际值。"
+            note="模板渲染成发给会话的审查请求文本；发起前还可以在弹窗里逐条修改。"
+            onSave={function savePrompt(next) {
+              void save({ reviewPrompt: next });
+            }}
+          />
+        </SettingsSection>
+
         <SettingsSection title="提示词">
           <PromptEditor
             label="自定义分析提示词"

@@ -376,6 +376,7 @@ function OverlayBody(props: {
         theme={theme}
         live={liveState}
         pendingTodos={activity.pendingTodos}
+        compact={compact}
       />
     </ScrollView>
   );

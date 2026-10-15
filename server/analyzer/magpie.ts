@@ -16,6 +16,8 @@ export type MagpieRunConfig = AnalysisConfig & {
   baseUrl?: string;
   /** Optional bearer token; Magpie ignores it but proxies behind auth may not. */
   apiKey?: string;
+  /** Include the review.suggested field and rule in schema and prompt. */
+  review?: boolean;
   /** Injected for tests. */
   fetchImpl?: typeof fetch;
 };
@@ -43,6 +45,8 @@ export type MagpieRequest = {
   systemPrompt: string | null;
   input: AnalyzerInput;
   timeoutMs: number;
+  /** Include the review.suggested field and rule in schema and prompt. */
+  review?: boolean;
   fetchImpl?: typeof fetch;
 };
 
@@ -52,7 +56,7 @@ export function buildMagpieRequest(args: MagpieRequest): {
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
-  const schema = buildAnalysisSchema();
+  const schema = buildAnalysisSchema(args.review === true);
   return {
     url: `${args.baseUrl.replace(/\/+$/, "")}/chat/completions`,
     headers: {
@@ -63,7 +67,10 @@ export function buildMagpieRequest(args: MagpieRequest): {
       model: args.model,
       messages: [
         { role: "system", content: args.systemPrompt?.trim() || buildSystemPrompt() },
-        { role: "user", content: buildAnalysisPrompt(args.input, schema, args.systemPrompt) },
+        {
+          role: "user",
+          content: buildAnalysisPrompt(args.input, schema, args.systemPrompt, args.review === true),
+        },
       ],
       // The schema is also spelled out in the prompt; json_object keeps the
       // reply parseable without depending on strict structured output support.
@@ -150,6 +157,7 @@ export class MagpieAnalyzer {
       systemPrompt: config.systemPrompt ?? null,
       input,
       timeoutMs: config.timeoutMs ?? DEFAULT_MAGPIE_TIMEOUT_MS,
+      review: config.review,
       fetchImpl: config.fetchImpl,
     });
   }

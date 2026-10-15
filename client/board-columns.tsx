@@ -29,6 +29,7 @@ type CommonProps = {
   onToggleSubagents(parentId: string): void;
   onDefer(session: SessionView): void;
   onResume(session: SessionView): void;
+  onReopen(session: SessionView): void;
 };
 
 function CardList(props: CommonProps & { column: ColumnDef }) {
@@ -69,6 +70,7 @@ function CardList(props: CommonProps & { column: ColumnDef }) {
               onOpen={props.onOpen}
               onDefer={props.onDefer}
               onResume={props.onResume}
+              onReopen={props.onReopen}
             />
           );
         })

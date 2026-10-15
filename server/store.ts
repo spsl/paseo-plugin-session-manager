@@ -18,16 +18,37 @@ import {
   type HistoryEntry,
   type Lifecycle,
   type Liveness,
+  type ReviewVerdict,
   type SessionView,
   type TitleState,
   type Turn,
 } from "../shared/types";
-import { MAX_TEXT_LENGTH, stableTextHash } from "./turns";
+import { MAX_TEXT_LENGTH, stableTextHash, type TimelineCursor } from "./turns";
 
 export const MAX_SESSIONS = 200;
 export const MAX_TURNS_PER_SESSION = 12;
+export const MAX_REVIEWERS = 8;
 export const PERSIST_DEBOUNCE_MS = 300;
 const PERSISTED_STATE_VERSION = 1;
+
+/** Persisted facts of one code-review request; the phase is derived, not stored. */
+export type ReviewRecord = {
+  /** `rv_<base36>`, also the `session-manager.review` label value. */
+  id: string;
+  /** The latest turn when the request was sent; its changes count as reviewed. */
+  turnId: string;
+  trigger: "auto" | "manual";
+  requestedAt: number;
+  /** `git rev-parse HEAD` at send time; null on non-git directories. */
+  baseHead: string | null;
+  /** Reviewer sub-agent ids attributed to this request. */
+  reviewerIds: string[];
+  verifiedTurnId: string | null;
+  verdict: ReviewVerdict | null;
+  error: string | null;
+  /** Set when the human replies after the verdict; kept for the detail pane. */
+  closedAt: number | null;
+};
 
 /** Server-side record: the persisted SessionView fields plus analysis inputs. */
 export type SessionRecord = Omit<
@@ -40,6 +61,7 @@ export type SessionRecord = Omit<
   | "needsAttention"
   | "deferEndedAt"
   | "declared"
+  | "review"
 > & {
   /**
    * The `interruptedAt` already reported to the team coordinator, so the
@@ -61,7 +83,30 @@ export type SessionRecord = Omit<
   /** Agent labels from the last snapshot; only meaningful when `labelsKnown`. */
   labels: Record<string, string>;
   labelsKnown: boolean;
+  /** The open or most recent code review; null when none was requested. */
+  review: ReviewRecord | null;
+  /** Turns up to and including this id count as reviewed. */
+  reviewedThroughTurnId: string | null;
+  /** HEAD at the last successful review request; the since_last_review baseline. */
+  lastReviewHead: string | null;
+  /** The turn whose review suggestion was dismissed; suppresses a re-suggestion. */
+  reviewDismissedTurnId: string | null;
+  /** Where ended turns stop in the live timeline; bounds the next turn's slice. */
+  timelineCursor: TimelineCursor | null;
 };
+
+function hydrateTimelineCursor(value: unknown): TimelineCursor | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const length = finiteNumber(record.length);
+  const tailHash = boundedText(record.tailHash);
+  if (length === null || !Number.isInteger(length) || length < 0) {
+    return null;
+  }
+  return { length, tailHash: tailHash ?? "" };
+}
 
 export type StateStore = {
   load(): Promise<SessionRecord[]>;
@@ -100,6 +145,48 @@ function hydrateDeclared(value: unknown): Declared | null {
   return { kind, text: record.text.trim().slice(0, DECLARED_TEXT_MAX_LENGTH) };
 }
 
+function hydrateVerdict(value: unknown): ReviewVerdict | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const valid = finiteNumber(record.valid);
+  const invalid = finiteNumber(record.invalid);
+  const unsure = finiteNumber(record.unsure);
+  if (valid === null || invalid === null || unsure === null) {
+    return null;
+  }
+  return { valid, invalid, unsure };
+}
+
+function hydrateReview(value: unknown): ReviewRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = boundedText(record.id);
+  const turnId = boundedText(record.turnId);
+  const requestedAt = finiteNumber(record.requestedAt);
+  if (!id || !turnId || requestedAt === null) {
+    return null;
+  }
+  return {
+    id,
+    turnId,
+    trigger: record.trigger === "auto" ? "auto" : "manual",
+    requestedAt,
+    baseHead: boundedText(record.baseHead),
+    reviewerIds: (Array.isArray(record.reviewerIds) ? record.reviewerIds : [])
+      .map(boundedText)
+      .filter((reviewer): reviewer is string => reviewer !== null)
+      .slice(0, MAX_REVIEWERS),
+    verifiedTurnId: boundedText(record.verifiedTurnId),
+    verdict: hydrateVerdict(record.verdict),
+    error: boundedText(record.error),
+    closedAt: finiteNumber(record.closedAt),
+  };
+}
+
 function hydrateTurn(value: unknown): Turn | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -112,6 +199,7 @@ function hydrateTurn(value: unknown): Turn | null {
     return null;
   }
   const userInput = boundedText(record.userInput);
+  const editCount = finiteNumber(record.editCount);
   return {
     id,
     dedupeKey: boundedText(record.dedupeKey) ?? stableTextHash(`${userInput ?? ""}\0${agentOutput}`),
@@ -121,6 +209,8 @@ function hydrateTurn(value: unknown): Turn | null {
     completedAt,
     contextIncomplete: record.contextIncomplete === true,
     declared: hydrateDeclared(record.declared),
+    editCount: editCount === null ? 0 : Math.max(0, Math.floor(editCount)),
+    reviewVerdict: hydrateVerdict(record.reviewVerdict),
   };
 }
 
@@ -198,6 +288,10 @@ function hydrateAnalysis(value: unknown): Analysis | null {
   ) {
     return null;
   }
+  const review =
+    record.review && typeof record.review === "object"
+      ? (record.review as Record<string, unknown>)
+      : null;
   return {
     title,
     summary,
@@ -212,6 +306,9 @@ function hydrateAnalysis(value: unknown): Analysis | null {
     confidence: Math.min(1, Math.max(0, confidence)),
     ...(done ? { done } : {}),
     ...(now ? { now } : {}),
+    ...(review && typeof review.suggested === "boolean"
+      ? { review: { suggested: review.suggested, reason: boundedText(review.reason) ?? "" } }
+      : {}),
   };
 }
 
@@ -298,13 +395,28 @@ export function hydrateRecord(value: unknown): SessionRecord | null {
     historyBaseTurnId: boundedText(record.historyBaseTurnId),
     labels: labels ?? {},
     labelsKnown: labels !== null,
+    review: hydrateReview(record.review),
+    reviewedThroughTurnId: boundedText(record.reviewedThroughTurnId),
+    lastReviewHead: boundedText(record.lastReviewHead),
+    reviewDismissedTurnId: boundedText(record.reviewDismissedTurnId),
+    timelineCursor: hydrateTimelineCursor(record.timelineCursor),
   };
 }
 
 export function copyRecord(record: SessionRecord): SessionRecord {
   return {
     ...record,
-    turns: record.turns.map((turn) => ({ ...turn })),
+    turns: record.turns.map((turn) => ({
+      ...turn,
+      ...(turn.reviewVerdict ? { reviewVerdict: { ...turn.reviewVerdict } } : {}),
+    })),
+    review: record.review
+      ? {
+          ...record.review,
+          reviewerIds: [...record.review.reviewerIds],
+          verdict: record.review.verdict ? { ...record.review.verdict } : null,
+        }
+      : null,
     history: record.history.map((entry) => ({ ...entry })),
     titleState: { ...record.titleState },
     labels: { ...record.labels },
@@ -334,6 +446,9 @@ export function boundRecords(records: readonly SessionRecord[]): SessionRecord[]
       }));
       copy.firstUserMessage = copy.firstUserMessage?.slice(0, MAX_TEXT_LENGTH) ?? null;
       copy.history = copy.history.slice(-MAX_HISTORY_ENTRIES);
+      if (copy.review) {
+        copy.review.reviewerIds = copy.review.reviewerIds.slice(0, MAX_REVIEWERS);
+      }
       return copy;
     });
 }

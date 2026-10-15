@@ -710,6 +710,16 @@ export function patchDismissResume<T extends WithSessions>(snapshot: T, sessionI
   });
 }
 
+/** Optimistic: a reopen request was accepted; the card shows 重新打开中…. */
+export function patchReopen<T extends WithSessions>(snapshot: T, sessionId: string): T {
+  return mapSession(snapshot, sessionId, function apply(session) {
+    if (isActiveLiveness(session.liveness)) {
+      return session;
+    }
+    return { ...session, resumeState: "resuming", resumeError: null };
+  });
+}
+
 export function patchForget<T extends WithSessions>(snapshot: T, sessionId: string): T {
   return {
     ...snapshot,

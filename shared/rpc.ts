@@ -2,7 +2,13 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { ANALYZER_AGENTS } from "./analysis-config";
 import { AnnouncementSchema, MAX_SPEECH_CHARS, SpeechVoiceSchema } from "./speech";
-import { AnalysisStatusSchema, SessionDetailSchema, SessionViewSchema } from "./types";
+import {
+  AnalysisRunSchema,
+  AnalysisStatusSchema,
+  FlowTurnSchema,
+  SessionDetailSchema,
+  SessionViewSchema,
+} from "./types";
 
 const SessionIdInput = z.object({ sessionId: z.string() });
 const MutationOutput = z.object({ ok: z.boolean(), reason: z.string().optional() });
@@ -90,6 +96,40 @@ export const dismissResumeRpc = defineRpc({
   output: MutationOutput,
 });
 
+/** Reopen a closed session; the daemon reloads the agent from its persisted provider session. */
+export const reopenRpc = defineRpc({
+  name: "session-manager.reopen",
+  input: SessionIdInput,
+  output: MutationOutput,
+});
+
+/** The rendered review request the edit-then-send dialog prefills. */
+export const reviewPreviewRpc = defineRpc({
+  name: "session-manager.review.preview",
+  input: SessionIdInput,
+  output: z.object({ text: z.string() }),
+});
+
+/**
+ * Send the review request into the session. `text` is the user-edited body;
+ * absent uses the default template rendered with current settings.
+ */
+export const reviewRequestRpc = defineRpc({
+  name: "session-manager.review.request",
+  input: z.object({
+    sessionId: z.string(),
+    text: z.string().optional(),
+  }),
+  output: MutationOutput,
+});
+
+/** Clear the current review suggestion so the card stays quiet. */
+export const reviewDismissRpc = defineRpc({
+  name: "session-manager.review.dismiss",
+  input: SessionIdInput,
+  output: MutationOutput,
+});
+
 export const stopAgentRpc = defineRpc({
   name: "session-manager.stop_agent",
   input: SessionIdInput,
@@ -173,6 +213,27 @@ export const piModelsRpc = defineRpc({
     ),
     problem: z.string().nullable(),
   }),
+});
+
+/** The session flow chart (mermaid source) plus the per-turn digest list. */
+export const flowGetRpc = defineRpc({
+  name: "session-manager.flow.get",
+  input: z.object({ id: z.string() }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      code: z.string(),
+      turns: z.array(FlowTurnSchema),
+    }),
+    z.object({ ok: z.literal(false), error: z.string() }),
+  ]),
+});
+
+/** One analyzer call with its full result; `run` is null once it was trimmed or removed. */
+export const analysisRunRpc = defineRpc({
+  name: "session-manager.analysis.run",
+  input: z.object({ sessionId: z.string(), runId: z.number().int() }),
+  output: z.object({ run: AnalysisRunSchema.nullable() }),
 });
 
 /** Server-side mermaid → PNG render; the client draws it with RN <Image>. */

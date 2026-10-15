@@ -8,11 +8,16 @@ import {
   TITLE_MAX_LENGTH,
   isActiveLiveness,
   speechOf,
+  type Analysis,
+  type AnalysisRunOutcome,
+  type AnalysisRunSummary,
   type AnalysisState,
   type AnalysisStatus,
   type BoardColumn,
   type Lifecycle,
   type Liveness,
+  type ReviewPhase,
+  type ReviewView,
   type SessionView,
 } from "./types";
 
@@ -193,6 +198,46 @@ export type LiveState = {
 
 export type NowTone = "working" | "waiting" | "blocked" | "done" | "idle";
 
+/** Badge text for the review phase; verdict counts show once the verify reply lands. */
+export function reviewBadgeLabel(review: ReviewView): string {
+  switch (review.phase) {
+    case "suggested":
+      return "建议代码审查";
+    case "requested":
+      return "已请求审查";
+    case "reviewing":
+      return "审查中";
+    case "verifying":
+      return "复核中";
+    case "awaiting_confirmation": {
+      const verdict = review.verdict;
+      return verdict
+        ? `待确认审查结果（成立 ${verdict.valid} / 不成立 ${verdict.invalid} / 存疑 ${verdict.unsure}）`
+        : "待确认审查结果";
+    }
+    case "failed":
+      return "审查未启动";
+    case "interrupted":
+      return "审查被中断";
+  }
+}
+
+/** Badge tone for the review phase. */
+export function reviewBadgeTone(phase: ReviewPhase): "accent" | "warning" | "danger" | "muted" {
+  switch (phase) {
+    case "suggested":
+    case "requested":
+    case "reviewing":
+    case "verifying":
+      return "accent";
+    case "awaiting_confirmation":
+    case "failed":
+      return "warning";
+    case "interrupted":
+      return "danger";
+  }
+}
+
 /** The 现在 line of the detail pane. */
 export type NowLine = { tone: NowTone; text: string; detail: string | null };
 
@@ -245,6 +290,19 @@ export function nowLine(session: SessionView, live: LiveState | null): NowLine {
       detail: live?.activity ? firstLine(live.activity, NOW_MAX_LENGTH) : null,
     };
   }
+  // Idle with a review underway: the phase says more than the last analysis.
+  const review = session.review;
+  if (review !== null) {
+    const reviewTone: NowTone =
+      review.phase === "failed" || review.phase === "interrupted"
+        ? "blocked"
+        : review.phase === "awaiting_confirmation"
+          ? "waiting"
+          : review.phase === "suggested"
+            ? "idle"
+            : "working";
+    return { tone: reviewTone, text: reviewBadgeLabel(review), detail: review.reason };
+  }
   if (session.lifecycle === "error") {
     return { tone: "blocked", text: "Agent 出错", detail: said };
   }
@@ -268,10 +326,21 @@ export function nowLine(session: SessionView, live: LiveState | null): NowLine {
   };
 }
 
-/** Badge text for a dormant session's resume progress; null for other liveness. */
+/** Badge text for resume/reopen progress; idle closed sessions show nothing. */
 export function resumeStateLabel(
   session: Pick<SessionView, "liveness" | "resumeState">,
 ): string | null {
+  if (session.liveness === "closed" || session.liveness === "archived") {
+    switch (session.resumeState) {
+      case "queued":
+      case "resuming":
+        return "重新打开中…";
+      case "failed":
+        return "重新打开失败";
+      default:
+        return null;
+    }
+  }
   if (session.liveness !== "dormant") {
     return null;
   }
@@ -344,4 +413,47 @@ export function formatDeferRemaining(until: number, now: number): string {
     return `剩余 ${hours} 小时`;
   }
   return `剩余 ${Math.ceil(hours / 24)} 天`;
+}
+
+const RUN_OUTCOME_LABELS: Record<AnalysisRunOutcome, string> = {
+  applied: "已采用",
+  failed: "失败",
+  superseded: "未采用：已有更新的轮次",
+  discarded: "未采用：会话已归档",
+};
+
+export function analysisRunOutcomeLabel(outcome: AnalysisRunOutcome): string {
+  return RUN_OUTCOME_LABELS[outcome];
+}
+
+export function confidenceLabel(confidence: number): string {
+  return `${Math.round(confidence * 100)}%`;
+}
+
+/** Analyzer call duration: 0.8 秒 / 42 秒 / 2 分 5 秒. */
+export function formatDuration(ms: number): string {
+  if (ms < 10_000) {
+    return `${(Math.max(0, ms) / 1000).toFixed(1)} 秒`;
+  }
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  const rest = seconds % 60;
+  return rest === 0 ? `${Math.floor(seconds / 60)} 分` : `${Math.floor(seconds / 60)} 分 ${rest} 秒`;
+}
+
+/**
+ * The 分析记录 header note: the newest call's confidence, or that it failed.
+ * Sessions analyzed before calls were logged fall back to the stored analysis.
+ */
+export function latestRunNote(
+  runs: readonly Pick<AnalysisRunSummary, "confidence">[],
+  analysis: Pick<Analysis, "confidence"> | null,
+): string | null {
+  const latest = runs[0];
+  if (latest) {
+    return latest.confidence === null ? "最近一次失败" : `置信度 ${confidenceLabel(latest.confidence)}`;
+  }
+  return analysis ? `置信度 ${confidenceLabel(analysis.confidence)}` : null;
 }

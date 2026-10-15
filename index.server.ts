@@ -5,7 +5,8 @@ import { AnnouncementFeed } from "./server/announcements";
 import { TimelineCardPublisher } from "./server/cards";
 import { CardNotifier } from "./server/notifier";
 import { SpeechSettingsCache } from "./server/speech-settings";
-import { draftsPath, statePath } from "./server/data-dir";
+import { draftsPath, historyPath, statePath } from "./server/data-dir";
+import { openDigestStore } from "./server/digest-store";
 import { DraftStore } from "./server/drafts";
 import { registerHooks } from "./server/hooks";
 import { registerRpcHandlers } from "./server/rpc-handlers";
@@ -25,9 +26,10 @@ export default function contribute(server: PluginServerContext) {
   });
   const store = new JsonStateStore(statePath());
   const drafts = new DraftStore(draftsPath());
+  const digests = openDigestStore(historyPath());
   let service: SessionManagerService | null = null;
   const settings = new SettingsCache(settingsHandle, () => service?.settingsChanged());
-  service = new SessionManagerService({ store, settings, notifier });
+  service = new SessionManagerService({ store, settings, notifier, digests });
   const active = service;
 
   // Handlers register synchronously; restored state merges in when the load lands.
@@ -53,5 +55,6 @@ export default function contribute(server: PluginServerContext) {
     // must run before the flush so the change reaches disk.
     active.prepareShutdown();
     await Promise.all([store.flush(), drafts.flush()]);
+    digests.close();
   };
 }

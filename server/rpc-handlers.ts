@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
+  analysisRunRpc,
   announcementsRpc,
   applyGeneratedTitleRpc,
   clearDeferRpc,
@@ -8,11 +9,16 @@ import {
   detailRpc,
   draftGetRpc,
   draftSetRpc,
+  flowGetRpc,
   forgetRpc,
   magpieModelsRpc,
   mermaidRenderRpc,
   reanalyzeRpc,
+  reopenRpc,
   resumeRpc,
+  reviewDismissRpc,
+  reviewPreviewRpc,
+  reviewRequestRpc,
   dismissResumeRpc,
   piModelsRpc,
   setAgentModeRpc,
@@ -72,6 +78,14 @@ export function registerRpcHandlers(
     service.touchPaseo(ctx.paseo);
     return { session: service.detail(input.sessionId) };
   });
+  server.handle(flowGetRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.flow(input.id);
+  });
+  server.handle(analysisRunRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return { run: service.analysisRun(input.sessionId, input.runId) };
+  });
   server.handle(reanalyzeRpc, (input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return service.reanalyze(input.sessionId);
@@ -107,6 +121,22 @@ export function registerRpcHandlers(
   server.handle(dismissResumeRpc, (input, ctx) => {
     service.touchPaseo(ctx.paseo);
     return service.dismissResume(input.sessionId);
+  });
+  server.handle(reopenRpc, async (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.reopen(input.sessionId);
+  });
+  server.handle(reviewPreviewRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.previewReview(input.sessionId);
+  });
+  server.handle(reviewRequestRpc, async (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.requestReview(input.sessionId, input.text);
+  });
+  server.handle(reviewDismissRpc, (input, ctx) => {
+    service.touchPaseo(ctx.paseo);
+    return service.dismissReview(input.sessionId);
   });
   server.handle(stopAgentRpc, async (input, ctx) => {
     service.touchPaseo(ctx.paseo);

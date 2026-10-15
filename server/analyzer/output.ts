@@ -5,8 +5,11 @@ import {
   SPEECH_MAX_LENGTH,
   STEP_MAX_LENGTH,
   TITLE_MAX_LENGTH,
+  TURN_DIGEST_MAX_LENGTH,
+  TURN_STEP_MAX_LENGTH,
   normalizeTitle,
   type Analysis,
+  type TurnDigest,
 } from "../../shared/types";
 
 /* eslint-disable no-control-regex -- these patterns match terminal control bytes. */
@@ -91,6 +94,77 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null
 }
 
+const REVIEW_REASON_MAX_LENGTH = 80
+
+/** Optional on analyses written before the review field existed or while the trigger is off. */
+function analysisReview(record: Record<string, unknown>): Analysis['review'] {
+  const value = record.review
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  const review = asRecord(value)
+  if (!review || typeof review.suggested !== 'boolean') {
+    throw new Error('分析结果字段 review 无效')
+  }
+  if (review.reason !== undefined && typeof review.reason !== 'string') {
+    throw new Error('分析结果字段 review 无效')
+  }
+  return {
+    suggested: review.suggested,
+    reason:
+      typeof review.reason === 'string'
+        ? clipLine(review.reason, REVIEW_REASON_MAX_LENGTH)
+        : ''
+  }
+}
+
+/**
+ * Per-turn step/digest the analyzer returns. Malformed entries are dropped one
+ * by one so a bad item can't fail the whole analysis; unknown turnIds are
+ * ignored later at write time.
+ */
+function analysisTurnDigests(
+  record: Record<string, unknown>
+): TurnDigest[] | undefined {
+  const value = record.turnDigests
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (!Array.isArray(value)) {
+    throw new Error('分析结果字段 turnDigests 无效')
+  }
+  const out: TurnDigest[] = []
+  for (const item of value) {
+    const entry = asRecord(item)
+    if (!entry) {
+      continue
+    }
+    const turnId = entry.turnId
+    const step = entry.step
+    const digest = entry.digest
+    if (
+      typeof turnId !== 'string' ||
+      typeof step !== 'string' ||
+      typeof digest !== 'string'
+    ) {
+      continue
+    }
+    const id = turnId.trim()
+    if (id === '') {
+      continue
+    }
+    out.push({
+      turnId: id,
+      step: clipLine(step, TURN_STEP_MAX_LENGTH),
+      digest:
+        digest.trim().length > TURN_DIGEST_MAX_LENGTH
+          ? `${digest.trim().slice(0, TURN_DIGEST_MAX_LENGTH - 1)}…`
+          : digest.trim()
+    })
+  }
+  return out
+}
+
 function text(
   record: Record<string, unknown>,
   key: string,
@@ -144,6 +218,8 @@ export function parseAnalysis(value: unknown): Analysis {
   const speech = optionalLine(record, 'speech', SPEECH_MAX_LENGTH)
   const now = optionalLine(record, 'now', NOW_MAX_LENGTH)
   const done = analysisDone(record)
+  const review = analysisReview(record)
+  const turnDigests = analysisTurnDigests(record)
   return {
     title: analysisTitle(record),
     summary: text(record, 'summary', 2_000),
@@ -157,7 +233,9 @@ export function parseAnalysis(value: unknown): Analysis {
     needsUserAttention: record.needsUserAttention,
     confidence,
     ...(done === undefined ? {} : { done }),
-    ...(now === undefined ? {} : { now })
+    ...(now === undefined ? {} : { now }),
+    ...(review === undefined ? {} : { review }),
+    ...(turnDigests === undefined ? {} : { turnDigests })
   }
 }
 

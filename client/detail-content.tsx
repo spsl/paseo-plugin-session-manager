@@ -1,16 +1,18 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { usePaseo, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   analysisStateLabel,
   branchLabel,
+  confidenceLabel,
   firstLine,
   formatDeferRemaining,
   formatDeferUntil,
   formatStepTime,
+  latestRunNote,
   lifecycleLabel,
   livenessLabel,
   nowLine,
@@ -22,11 +24,17 @@ import {
 import {
   DECLARED_KIND_LABELS,
   isActiveLiveness,
+  type AnalysisRunSummary,
+  type FlowTurn,
   type SessionDetail,
   type Turn,
 } from "../shared/types";
+import { flowGetRpc } from "../shared/rpc";
+import { AnalysisRunDialog, type AnalysisRunTarget } from "./analysis-run-dialog";
 import { Badge, Chip } from "./badge";
 import { Markdown } from "./markdown/markdown";
+import { MermaidBlock } from "./markdown/mermaid-block";
+import { ReviewRequestDialog } from "./review-dialog";
 import { declaredTone, errorText, formatDateTime, statusTone } from "./styles";
 import { SNAPSHOT_QUERY_KEY, useSessionActions } from "./use-snapshot";
 
@@ -63,31 +71,17 @@ function Field(props: { theme: PluginTheme; label: string; value: string }) {
   );
 }
 
-function ListBlock(props: { theme: PluginTheme; title: string; items: readonly string[]; empty: string }) {
-  const { colors } = props.theme;
-  return (
-    <View style={{ gap: 3 }}>
-      <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "600" }}>{props.title}</Text>
-      {props.items.length === 0 ? (
-        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{props.empty}</Text>
-      ) : (
-        props.items.map(function renderItem(item, index) {
-          return (
-            <Text key={index} style={{ color: colors.foreground, fontSize: 12, lineHeight: 18 }}>
-              {`• ${item}`}
-            </Text>
-          );
-        })
-      )}
-    </View>
-  );
-}
-
 function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
   const { colors } = props.theme;
   const { turn } = props;
   const [open, setOpen] = useState(false);
   const mark = OUTCOME_MARKS[turn.outcome] ?? null;
+  const missingInput =
+    turn.userInput === null
+      ? turn.contextIncomplete
+        ? "未采集到该轮输入"
+        : "本轮没有新的用户消息"
+      : null;
   return (
     <View
       style={{
@@ -108,8 +102,7 @@ function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
           {formatStepTime(turn.completedAt, Date.now())}
         </Text>
         <Text style={{ flex: 1, color: colors.foreground, fontSize: 12 }} numberOfLines={1}>
-          {firstLine(turn.userInput, 300) ??
-            "未采集到该轮输入"}
+          {firstLine(turn.userInput, 300) ?? missingInput ?? "未采集到该轮输入"}
         </Text>
         {mark ? (
           <Text
@@ -131,7 +124,7 @@ function TurnRow(props: { theme: PluginTheme; turn: Turn }) {
           <View style={{ gap: 3 }}>
             <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>用户输入</Text>
             {turn.userInput === null ? (
-              <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>未采集到该轮输入</Text>
+              <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{missingInput}</Text>
             ) : (
               <Markdown theme={props.theme} text={turn.userInput} compact />
             )}
@@ -339,14 +332,25 @@ function HistoryBlock(props: { theme: PluginTheme; session: SessionDetail }) {
   );
 }
 
-function NowBlock(props: { theme: PluginTheme; session: SessionDetail; live: LiveState | null }) {
+function NowBlock(props: {
+  theme: PluginTheme;
+  session: SessionDetail;
+  live: LiveState | null;
+  compact: boolean;
+}) {
   const { theme, session } = props;
   const { colors } = theme;
   const actions = useSessionActions();
   const line = nowLine(session, props.live);
   const tone = nowToneColor(theme, line.tone);
+  const live = session.liveness === "live";
   const dormant = session.liveness === "dormant";
+  const reopenable = session.liveness === "closed" || session.liveness === "archived";
   const resuming = session.resumeState === "queued" || session.resumeState === "resuming";
+  const reviewPhase = session.review?.phase ?? null;
+  const reviewBusy =
+    reviewPhase === "requested" || reviewPhase === "reviewing" || reviewPhase === "verifying";
+  const [reviewOpen, setReviewOpen] = useState(false);
   return (
     <Section theme={theme} title="现在">
       <View
@@ -373,8 +377,21 @@ function NowBlock(props: { theme: PluginTheme; session: SessionDetail; live: Liv
             {`分析失败：${session.analysisError}`}
           </Text>
         ) : null}
-        {dormant && session.resumeError ? (
+        {(dormant || reopenable) && session.resumeError ? (
           <Text style={{ color: colors.statusDanger, fontSize: 12, lineHeight: 18 }}>{session.resumeError}</Text>
+        ) : null}
+        {reopenable ? (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Chip
+              theme={theme}
+              label={resuming ? "重新打开中…" : session.resumeState === "failed" ? "重试" : "重新打开"}
+              selected={false}
+              disabled={resuming}
+              onPress={function reopen() {
+                void actions.reopen(session.id);
+              }}
+            />
+          </View>
         ) : null}
         {dormant ? (
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
@@ -397,6 +414,38 @@ function NowBlock(props: { theme: PluginTheme; session: SessionDetail; live: Liv
               }}
             />
           </View>
+        ) : null}
+        {live ? (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Chip
+              theme={theme}
+              label="代码审查"
+              selected={false}
+              disabled={reviewBusy}
+              onPress={function openReview() {
+                setReviewOpen(true);
+              }}
+            />
+            {reviewPhase === "suggested" ? (
+              <Chip
+                theme={theme}
+                label="忽略建议"
+                selected={false}
+                onPress={function dismissReview() {
+                  void actions.dismissReview(session.id);
+                }}
+              />
+            ) : null}
+          </View>
+        ) : null}
+        {live ? (
+          <ReviewRequestDialog
+            sessionId={session.id}
+            open={reviewOpen}
+            onOpenChange={setReviewOpen}
+            theme={theme}
+            compact={props.compact}
+          />
         ) : null}
       </View>
     </Section>
@@ -493,20 +542,253 @@ function StatusControls(props: { theme: PluginTheme; session: SessionDetail }) {
   );
 }
 
-function AnalysisDetails(props: { theme: PluginTheme; session: SessionDetail }) {
+/** Sub-agent statuses worth marking; "completed" is the quiet default. */
+const SUB_AGENT_STATUS_MARKS: Record<string, string> = {
+  running: "进行中",
+  failed: "失败",
+  canceled: "已取消",
+};
+
+/** One row of the flow section's per-turn list; expands to digest + sub-agents. */
+function FlowTurnRow(props: {
+  theme: PluginTheme;
+  turn: FlowTurn;
+  open: boolean;
+  onToggle(): void;
+}) {
+  const { theme, turn, open } = props;
+  const { colors } = theme;
+  const mark = OUTCOME_MARKS[turn.outcome as Turn["outcome"]] ?? null;
+  // Same fallback chain as the chart node: step → 该轮「之前」首条 → 用户输入.
+  const title = turn.step || turn.historyLabel || firstLine(turn.userInput, 40) || "未命名步骤";
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderColor: colors.border,
+        borderRadius: 8,
+        backgroundColor: colors.surface1,
+      }}
+    >
+      <Pressable
+        accessibilityRole="button"
+        onPress={props.onToggle}
+        style={{ padding: 10, flexDirection: "row", alignItems: "center", gap: 8 }}
+      >
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+          {`第 ${turn.index} 轮 · ${formatStepTime(turn.completedAt, Date.now())}`}
+        </Text>
+        <Text style={{ flex: 1, color: colors.foreground, fontSize: 12 }} numberOfLines={1}>
+          {title}
+        </Text>
+        {mark ? (
+          <Text
+            style={{
+              color: turn.outcome === "failed" ? colors.statusDanger : colors.foregroundMuted,
+              fontSize: 12,
+            }}
+          >
+            {mark}
+          </Text>
+        ) : null}
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{open ? "收起" : "展开"}</Text>
+      </Pressable>
+      {open ? (
+        <View style={{ padding: 10, paddingTop: 0, gap: 8 }}>
+          <View style={{ gap: 3 }}>
+            <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>摘要</Text>
+            {turn.digest ? (
+              <Text selectable style={{ color: colors.foreground, fontSize: 12, lineHeight: 18 }}>
+                {turn.digest}
+              </Text>
+            ) : (
+              <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>暂无摘要</Text>
+            )}
+          </View>
+          {turn.userInput ? (
+            <View style={{ gap: 3 }}>
+              <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>用户输入</Text>
+              <Text selectable style={{ color: colors.foreground, fontSize: 12, lineHeight: 18 }}>
+                {turn.userInput}
+              </Text>
+            </View>
+          ) : null}
+          {turn.subAgents.length + turn.children.length > 0 ? (
+            <View style={{ gap: 3 }}>
+              <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>子 Agent</Text>
+              {turn.subAgents.map(function renderSubAgent(subAgent) {
+                const status = SUB_AGENT_STATUS_MARKS[subAgent.status] ?? null;
+                return (
+                  <View key={subAgent.callId} style={{ gap: 1 }}>
+                    <Text style={{ color: colors.foreground, fontSize: 12 }}>
+                      {`子 Agent · ${subAgent.type || "未命名"}${status ? `（${status}）` : ""}`}
+                    </Text>
+                    {subAgent.description !== "" ? (
+                      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+                        {subAgent.description}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+              {turn.children.map(function renderChild(child) {
+                return (
+                  <View key={child.id} style={{ gap: 1 }}>
+                    <Text style={{ color: colors.foreground, fontSize: 12 }}>
+                      {`子会话 · ${child.columnLabel}`}
+                    </Text>
+                    {child.detail ? (
+                      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+                        {child.detail}
+                      </Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** Fetches the flow lazily — the enclosing FoldSection mounts this on expand. */
+function FlowBody(props: { theme: PluginTheme; session: SessionDetail }) {
   const { theme, session } = props;
   const { colors } = theme;
-  const analysis = session.analysis;
+  const flowGet = useRpc(flowGetRpc);
+  // Expanded rows are keyed by turnId up here so a data refresh never folds them.
+  const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({});
+  const query = useQuery({
+    queryKey: ["session-manager", "flow", session.id, session.updatedAt],
+    queryFn: async function load() {
+      return flowGet({ id: session.id });
+    },
+    staleTime: Infinity,
+    retry: false,
+    // A new turn changes updatedAt and refetches; keep the last chart on
+    // screen instead of flashing the loading line between keys.
+    placeholderData: function keepPrevious(previous) {
+      return previous;
+    },
+  });
+  if (query.isPending) {
+    return <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>正在生成流程图…</Text>;
+  }
+  if (query.isError) {
+    return (
+      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+        {`流程图加载失败：${errorText(query.error)}`}
+      </Text>
+    );
+  }
+  const data = query.data;
+  if (data === undefined || !data.ok) {
+    return (
+      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+        {`流程图不可用：${data !== undefined && !data.ok ? data.error : "未知错误"}`}
+      </Text>
+    );
+  }
+  if (data.turns.length === 0) {
+    return <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>还没有可画的轮次</Text>;
+  }
+  return (
+    <View style={{ gap: 8 }}>
+      <MermaidBlock theme={theme} code={data.code} />
+      <View style={{ gap: 4 }}>
+        {data.turns.map(function renderFlowTurn(turn) {
+          return (
+            <FlowTurnRow
+              key={turn.turnId}
+              theme={theme}
+              turn={turn}
+              open={openTurns[turn.turnId] === true}
+              onToggle={function toggle() {
+                setOpenTurns(function update(current) {
+                  return { ...current, [turn.turnId]: current[turn.turnId] !== true };
+                });
+              }}
+            />
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+/** Newest analysis records shown before 显示更早 is pressed. */
+const RUNS_VISIBLE = 10;
+
+/** One analyzer call: when it ran and what the user said in the analyzed turn. */
+function AnalysisRunRow(props: { theme: PluginTheme; run: AnalysisRunSummary; onOpen(): void }) {
+  const { theme, run } = props;
+  const { colors } = theme;
+  const mark =
+    run.outcome === "failed"
+      ? "失败"
+      : run.outcome !== "applied"
+        ? "未采用"
+        : run.confidence !== null
+          ? confidenceLabel(run.confidence)
+          : null;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={props.onOpen}
+      style={{
+        padding: 10,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        borderWidth: 1,
+        borderColor: colors.border,
+        borderRadius: 8,
+        backgroundColor: colors.surface1,
+      }}
+    >
+      <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+        {formatStepTime(run.startedAt, Date.now())}
+      </Text>
+      <Text style={{ flex: 1, color: colors.foreground, fontSize: 12 }} numberOfLines={1}>
+        {firstLine(run.userInput, 300) ?? "无新的用户消息"}
+      </Text>
+      {run.reanalysis ? (
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>重新分析</Text>
+      ) : null}
+      {mark ? (
+        <Text
+          style={{
+            color: run.outcome === "failed" ? colors.statusDanger : colors.foregroundMuted,
+            fontSize: 12,
+          }}
+        >
+          {mark}
+        </Text>
+      ) : null}
+      <Icon name="ChevronRight" size={14} color={colors.foregroundMuted} />
+    </Pressable>
+  );
+}
+
+/** Every analyzer call of the session, newest first; a row opens its details in a dialog. */
+function AnalysisRuns(props: { theme: PluginTheme; session: SessionDetail }) {
+  const { theme, session } = props;
+  const { colors } = theme;
+  const [target, setTarget] = useState<AnalysisRunTarget | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const runs = session.analysisRuns;
+  const note = latestRunNote(runs, session.analysis);
+  const pending = session.analysisState === "queued" || session.analysisState === "running";
+  const shown = showAll ? runs : runs.slice(0, RUNS_VISIBLE);
+  const legacy = runs.length === 0 ? session.analysis : null;
   return (
     <FoldSection
       theme={theme}
-      title="详细分析"
+      title={`分析记录（${runs.length}）`}
       trailing={
-        analysis ? (
-          <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
-            {`置信度 ${Math.round(analysis.confidence * 100)}%`}
-          </Text>
-        ) : null
+        note ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{note}</Text> : null
       }
     >
       {session.declared ? (
@@ -520,29 +802,73 @@ function AnalysisDetails(props: { theme: PluginTheme; session: SessionDetail }) 
           </Text>
         </View>
       ) : null}
-      {analysis ? (
-        <View style={{ gap: 10 }}>
-          <View style={{ gap: 3 }}>
-            <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "600" }}>当前判断</Text>
-            <Text selectable style={{ color: colors.foreground, fontSize: 12, lineHeight: 18 }}>
-              {analysis.summary || "暂无"}
-            </Text>
-          </View>
-          <View style={{ gap: 3 }}>
-            <Text style={{ color: colors.foreground, fontSize: 12, fontWeight: "600" }}>当前目标</Text>
-            <Text selectable style={{ color: colors.foreground, fontSize: 12, lineHeight: 18 }}>
-              {analysis.goal || "暂无"}
-            </Text>
-          </View>
-          <ListBlock theme={theme} title="进展" items={analysis.progress} empty="暂无明确进展" />
-          <ListBlock theme={theme} title="已完成" items={analysis.completed} empty="尚无完成证据" />
-          <ListBlock theme={theme} title="阻塞原因" items={analysis.blockers} empty="未发现阻塞项" />
-        </View>
-      ) : (
+      {pending ? (
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
-          {`${analysisStateLabel(session.analysisState)}，暂无分析结论。`}
+          {`${analysisStateLabel(session.analysisState)}…`}
+        </Text>
+      ) : null}
+      {runs.length > 0 ? (
+        <View style={{ gap: 4 }}>
+          {shown.map(function renderRun(run) {
+            return (
+              <AnalysisRunRow
+                key={run.id}
+                theme={theme}
+                run={run}
+                onOpen={function open() {
+                  setTarget({ kind: "run", run });
+                }}
+              />
+            );
+          })}
+          {runs.length > RUNS_VISIBLE ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={function toggle() {
+                setShowAll(!showAll);
+              }}
+            >
+              <Text style={{ color: colors.accent, fontSize: 12 }}>
+                {showAll ? "收起" : `显示更早的 ${runs.length - RUNS_VISIBLE} 条`}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : legacy ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={function open() {
+            setTarget({ kind: "legacy", analysis: legacy });
+          }}
+          style={{
+            padding: 10,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 8,
+            borderWidth: 1,
+            borderColor: colors.border,
+            borderRadius: 8,
+            backgroundColor: colors.surface1,
+          }}
+        >
+          <Text style={{ flex: 1, color: colors.foreground, fontSize: 12 }} numberOfLines={1}>
+            早前的分析（未记录调用信息）
+          </Text>
+          <Icon name="ChevronRight" size={14} color={colors.foregroundMuted} />
+        </Pressable>
+      ) : pending ? null : (
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>
+          {`${analysisStateLabel(session.analysisState)}，暂无分析记录。`}
         </Text>
       )}
+      <AnalysisRunDialog
+        sessionId={session.id}
+        target={target}
+        theme={theme}
+        onClose={function close() {
+          setTarget(null);
+        }}
+      />
     </FoldSection>
   );
 }
@@ -553,10 +879,12 @@ export function DetailContent(props: {
   /** Live state from the open conversation; null until it has loaded. */
   live?: LiveState | null;
   pendingTodos?: readonly string[];
+  compact?: boolean;
 }) {
   const { session, theme } = props;
   const { colors } = theme;
   const live = props.live ?? null;
+  const compact = props.compact === true;
   const turns = [...session.turns].reverse();
 
   const metadata: [string, string][] = [
@@ -578,12 +906,16 @@ export function DetailContent(props: {
     <>
       <StatusControls theme={theme} session={session} />
       <HistoryBlock theme={theme} session={session} />
-      <NowBlock theme={theme} session={session} live={live} />
+      <NowBlock theme={theme} session={session} live={live} compact={compact} />
       <NextBlock theme={theme} session={session} live={live} pendingTodos={props.pendingTodos ?? []} />
 
       <View style={{ height: 1, backgroundColor: colors.border }} />
 
-      <AnalysisDetails theme={theme} session={session} />
+      <FoldSection theme={theme} title="流程图" defaultOpen>
+        <FlowBody theme={theme} session={session} />
+      </FoldSection>
+
+      <AnalysisRuns theme={theme} session={session} />
 
       <FoldSection theme={theme} title="会话信息">
         <View style={{ gap: 4 }}>

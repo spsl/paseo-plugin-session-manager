@@ -1,8 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ANALYZER_SETTINGS, type AnalyzerSettings } from "../shared/settings";
-import type { Analysis } from "../shared/types";
+import type { Analysis, Turn } from "../shared/types";
 import type { Analyzer } from "./analyzer/analyzer";
 import type { AnalyzerInput } from "./analyzer/prompt";
+import { openDigestStore, type DigestStore } from "./digest-store";
 import type {
   ArchivedEvent,
   ClosedEvent,
@@ -11,7 +15,7 @@ import type {
   TurnStartedEvent,
 } from "./host-types";
 import { newRecord } from "./lifecycle";
-import { SessionManagerService } from "./service";
+import { SessionManagerService, type ServiceDeps } from "./service";
 import type { SessionRecord, StateStore } from "./store";
 
 const agent = (id = "a1") => ({
@@ -91,6 +95,7 @@ function make(
   analyzer?: Analyzer,
   store?: StateStore,
   now?: () => number,
+  extras: Partial<ServiceDeps> = {},
 ) {
   let current: AnalyzerSettings = { ...DEFAULT_ANALYZER_SETTINGS, ...settings };
   const service = new SessionManagerService({
@@ -100,6 +105,7 @@ function make(
     checkAnalyzer: async () => null,
     writeTitle: vi.fn(async () => undefined),
     ...(now ? { now } : {}),
+    ...extras,
   });
   return { service, setSettings: (next: Partial<AnalyzerSettings>) => (current = { ...current, ...next }) };
 }
@@ -732,6 +738,139 @@ describe("SessionManagerService", () => {
       }
     });
 
+    it("reopen refuses sessions that are not closed, and dormant goes through resume", async () => {
+      const { service } = make({}, undefined, memoryStore([dormantRecord("d1")]));
+      await service.load();
+      service.onCreated({ agent: agent("live") });
+      const { paseo, calls } = fakeDaemon([], async (id) => idleResult(id));
+      service.touchPaseo(paseo);
+      expect(await service.reopen("live")).toEqual({ ok: false, reason: "会话未关闭" });
+      expect(await service.reopen("missing")).toEqual({ ok: false, reason: "会话不存在" });
+      // Dormant sessions reopen through the regular resume path.
+      expect(await service.reopen("d1")).toEqual({ ok: true });
+      expect(service.getRecord("d1")?.liveness).toBe("live");
+      expect(calls).toHaveLength(1);
+    });
+
+    it("reopen unarchives via the agent reload CLI, never the timeline refetch", async () => {
+      const reload = vi.fn(async (id: string) => ({ ok: true as const, id }));
+      const { service } = make(
+        {},
+        undefined,
+        memoryStore([
+          dormantRecord("a1", {
+            liveness: "archived",
+            archivedAt: 5,
+            manualStatusOverride: "completed",
+          }),
+        ]),
+        undefined,
+        { reloadAgentCli: reload },
+      );
+      await service.load();
+      // The reloaded agent reports idle; refresh returns null so reconcile resolves it.
+      const { paseo, calls } = fakeDaemon([listEntry("a1", "idle")], async (id) => idleResult(id));
+      service.touchPaseo(paseo);
+      expect(await service.reopen("a1")).toEqual({ ok: true });
+      expect(reload).toHaveBeenCalledWith("a1");
+      expect(calls).toHaveLength(0);
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "live",
+        archivedAt: null,
+        resumeState: "idle",
+        manualStatusOverride: null,
+      });
+    });
+
+    it("reopen reports a failed archived reload and stays archived", async () => {
+      const { service } = make(
+        {},
+        undefined,
+        memoryStore([dormantRecord("a1", { liveness: "archived", archivedAt: 5 })]),
+        undefined,
+        { reloadAgentCli: async () => ({ ok: false as const, reason: "重新打开超时" }) },
+      );
+      await service.load();
+      const { paseo, calls } = fakeDaemon([], async (id) => idleResult(id));
+      service.touchPaseo(paseo);
+      expect(await service.reopen("a1")).toEqual({ ok: false, reason: "重新打开超时" });
+      expect(calls).toHaveLength(0);
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "archived",
+        resumeState: "failed",
+        resumeError: "重新打开超时",
+      });
+    });
+
+    it("reopen brings a closed session back live and clears stale overrides", async () => {
+      let now = 1_000_000;
+      const { service } = make({}, undefined, undefined, () => now);
+      service.onCreated({ agent: agent("a1") });
+      service.setManualStatus("a1", "completed");
+      service.defer("a1", 3_600_000, true);
+      service.onClosed(closedEvent("a1"));
+      const record = service.getRecord("a1") as SessionRecord;
+      expect(record).toMatchObject({
+        liveness: "closed",
+        manualStatusOverride: "completed",
+      });
+      expect(record.deferredUntil).not.toBeNull();
+
+      now += 60_000;
+      const { paseo, calls } = fakeDaemon([], async (id) => idleResult(id));
+      service.touchPaseo(paseo);
+      expect(await service.reopen("a1")).toEqual({ ok: true });
+      expect(calls).toHaveLength(1);
+      expect(record).toMatchObject({
+        liveness: "live",
+        resumeState: "idle",
+        resumeError: null,
+        manualStatusOverride: null,
+        deferredUntil: null,
+        deferToQueue: false,
+        updatedAt: now,
+      });
+    });
+
+    it("reopen deduplicates in-flight calls and reports a failed refetch", async () => {
+      const { service } = make();
+      service.onCreated({ agent: agent("a1") });
+      service.onClosed(closedEvent("a1"));
+      expect(await service.reopen("a1")).toEqual({ ok: false, reason: "尚未连接到 Paseo" });
+      const { paseo, calls } = fakeDaemon([], async () => {
+        throw new Error("连接被拒绝");
+      });
+      service.touchPaseo(paseo);
+      const one = service.reopen("a1");
+      const two = service.reopen("a1");
+      expect(await one).toEqual({ ok: false, reason: "重新打开失败：连接被拒绝" });
+      expect(await two).toEqual({ ok: false, reason: "重新打开失败：连接被拒绝" });
+      expect(calls).toHaveLength(1);
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "closed",
+        resumeState: "failed",
+        resumeError: "重新打开失败：连接被拒绝",
+      });
+    });
+
+    it("reopen fails when Paseo still reports the session closed", async () => {
+      const { service } = make();
+      service.onCreated({ agent: agent("a1") });
+      service.onClosed(closedEvent("a1"));
+      const { paseo } = fakeDaemon([listEntry("a1", "closed")], async () => ({
+        agent: null,
+        entries: [],
+        hasOlder: false,
+      }));
+      service.touchPaseo(paseo);
+      const result = await service.reopen("a1");
+      expect(result.ok).toBe(false);
+      expect(service.getRecord("a1")).toMatchObject({
+        liveness: "closed",
+        resumeState: "failed",
+      });
+    });
+
     it("auto-resume picks only attention columns under the default policy", async () => {
       const attention = (status: "waiting_for_user" | "in_progress" | "unclear") =>
         dormantRecord(`s-${status}`, {
@@ -928,6 +1067,273 @@ describe("SessionManagerService", () => {
         resumeState: "failed",
         resumeError: "恢复失败：daemon 无响应",
       });
+    });
+  });
+
+  describe("history.db", () => {
+    let digests: DigestStore;
+    beforeEach(async () => {
+      const dir = await mkdtemp(join(tmpdir(), "sm-service-digests-"));
+      digests = openDigestStore(join(dir, "history.db"));
+    });
+    afterEach(() => {
+      digests.close();
+    });
+
+    const storedTurn = (id: string, output = "回复"): Turn => ({
+      id,
+      dedupeKey: `key-${id}-${output}`,
+      userInput: `输入-${id}`,
+      agentOutput: output,
+      outcome: "completed",
+      completedAt: 1_000,
+      contextIncomplete: false,
+      declared: null,
+      editCount: 0,
+      reviewVerdict: null,
+    });
+
+    it("upserts turns into history.db and feeds stored digests into the next analysis", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      // Long reply → no raw digest; the model's digest is what lands.
+      service.onTurnEnded(turnEnded("t1", "长".repeat(600)));
+      await tick();
+      calls[0].resolve({
+        ...analysis(),
+        turnDigests: [{ turnId: "t1", step: "第一轮步骤", digest: "第一轮摘要" }],
+      });
+      await service.waitForIdle();
+      const rows = digests.listTurns("a1");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        turnId: "t1",
+        step: "第一轮步骤",
+        digest: "第一轮摘要",
+        digestSource: "model",
+      });
+
+      service.onTurnEnded(turnEnded("t2", "第二轮回复"));
+      await tick();
+      // digests lists every row that has one — t2's own raw digest rides along;
+      // the prompt builder excludes window ids later.
+      const next = calls[1].input.digests ?? [];
+      expect(next).toHaveLength(2);
+      expect(next.find((entry) => entry.id === "t1")).toMatchObject({
+        step: "第一轮步骤",
+        digest: "第一轮摘要",
+      });
+      expect(next.find((entry) => entry.id === "t2")?.digest).toBe("第二轮回复");
+      calls[1].resolve(analysis());
+      await service.waitForIdle();
+    });
+
+    it("strips turnDigests from record.analysis and ignores non-new turn ids", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "长".repeat(600)));
+      await tick();
+      calls[0].resolve({
+        ...analysis(),
+        turnDigests: [{ turnId: "t1", step: "步骤一", digest: "摘要一" }],
+      });
+      await service.waitForIdle();
+      // turnDigests must not ride record.analysis — it's history.db-only data.
+      expect(service.getRecord("a1")?.analysis?.turnDigests).toBeUndefined();
+
+      // Different content — identical replies would be deduped and never analyzed.
+      service.onTurnEnded(turnEnded("t2", "另".repeat(600)));
+      await tick();
+      // For this run t1 was isNew=false; the model still emitted a digest for it.
+      calls[1].resolve({
+        ...analysis(),
+        turnDigests: [
+          { turnId: "t1", step: "覆盖", digest: "覆盖" },
+          { turnId: "t2", step: "步骤二", digest: "摘要二" },
+        ],
+      });
+      await service.waitForIdle();
+      const rows = digests.listTurns("a1");
+      expect(rows.find((row) => row.turnId === "t1")).toMatchObject({
+        step: "步骤一",
+        digest: "摘要一",
+      });
+      expect(rows.find((row) => row.turnId === "t2")).toMatchObject({
+        step: "步骤二",
+        digest: "摘要二",
+      });
+    });
+
+    it("rejects a write-back whose turn content changed mid-analysis", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "旧内容"));
+      await tick();
+      // Same turnId ends again with new content: the row is reset, analysis #1
+      // still resolves with digests describing the old content.
+      service.onTurnEnded(turnEnded("t1", "新内容"));
+      await tick();
+      calls[0].resolve({
+        ...analysis(),
+        turnDigests: [{ turnId: "t1", step: "旧步骤", digest: "旧摘要" }],
+      });
+      await tick();
+      const row = digests.listTurns("a1")[0];
+      expect(row.step).toBeNull();
+      expect(row.digest).toBe("新内容");
+      expect(row.digestSource).toBe("raw");
+
+      calls[1].resolve({
+        ...analysis(),
+        turnDigests: [{ turnId: "t1", step: "新步骤", digest: "新摘要" }],
+      });
+      await service.waitForIdle();
+      // The fresh write lands its step; the digest stays raw (short reply).
+      expect(digests.listTurns("a1")[0]).toMatchObject({
+        step: "新步骤",
+        digest: "新内容",
+        digestSource: "raw",
+      });
+    });
+
+    it("keeps a raw digest when the model writes one anyway, updating only the step", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "短回复"));
+      await tick();
+      calls[0].resolve({
+        ...analysis(),
+        turnDigests: [{ turnId: "t1", step: "步骤", digest: "模型写的摘要" }],
+      });
+      await service.waitForIdle();
+      const row = digests.listTurns("a1")[0];
+      expect(row.digestSource).toBe("raw");
+      expect(row.digest).toBe("短回复");
+      expect(row.step).toBe("步骤");
+    });
+
+    it("keeps the boundary on the analyzed turn when an analysis returns no done items", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "一"));
+      await tick();
+      calls[0].resolve({ ...analysis(), done: [] });
+      await service.waitForIdle();
+      service.onTurnEnded(turnEnded("t2", "二"));
+      await tick();
+      // analyzedTurnId=t1 stays the boundary even though nothing was recorded.
+      expect(calls[1].input.historyTurnId).toBe("t1");
+      calls[1].resolve(analysis());
+      await service.waitForIdle();
+    });
+
+    it("removes a session's rows when the record is forgotten", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "x"));
+      await tick();
+      calls[0].resolve(analysis());
+      await service.waitForIdle();
+      expect(digests.listTurns("a1")).toHaveLength(1);
+      service.onClosed({ agent: agent() } as ClosedEvent);
+      expect(service.forget("a1").ok).toBe(true);
+      expect(digests.listTurns("a1")).toHaveLength(0);
+    });
+
+    it("prunes orphaned rows on load when records exist", async () => {
+      digests.upsertTurn("keep", storedTurn("t1"), [], 1);
+      digests.upsertTurn("gone", storedTurn("t2"), [], 2);
+      const record = newRecord({ id: "keep", provider: "codex", cwd: "/w" }, 1);
+      const { service } = make({}, undefined, memoryStore([record]), undefined, { digests });
+      await service.load();
+      expect(digests.listTurns("keep")).toHaveLength(1);
+      expect(digests.listTurns("gone")).toHaveLength(0);
+    });
+
+    it("keeps every row when the state file reads back empty", async () => {
+      digests.upsertTurn("s1", storedTurn("t1"), [], 1);
+      digests.upsertTurn("s2", storedTurn("t2"), [], 2);
+      const { service } = make({}, undefined, memoryStore([]), undefined, { digests });
+      await service.load();
+      expect(digests.listTurns("s1")).toHaveLength(1);
+      expect(digests.listTurns("s2")).toHaveLength(1);
+    });
+
+    it("flow() merges stored digests with the 之前 fallback label", async () => {
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, undefined, { digests });
+      service.onTurnEnded(turnEnded("t1", "长".repeat(600)));
+      await tick();
+      calls[0].resolve({
+        ...analysis(),
+        done: ["做完一"],
+        turnDigests: [{ turnId: "t1", step: "步骤一", digest: "摘要一" }],
+      });
+      await service.waitForIdle();
+      const result = service.flow("a1");
+      expect(result.ok).toBe(true);
+      if (!result.ok) {
+        return;
+      }
+      expect(result.code).toContain("步骤一");
+      expect(result.turns).toHaveLength(1);
+      expect(result.turns[0]).toMatchObject({
+        turnId: "t1",
+        step: "步骤一",
+        historyLabel: "做完一",
+        digest: "摘要一",
+      });
+      expect(service.flow("missing").ok).toBe(false);
+    });
+
+    it("logs every analyzer call — applied, failed, superseded, reanalyzed — newest first", async () => {
+      let clock = 1_000;
+      const { analyzer, calls } = fakeAnalyzer();
+      const { service } = make({}, analyzer, undefined, () => clock, { digests });
+      service.onTurnEnded(turnEnded("t1", "回复一", "a1", "第一个问题"));
+      await tick();
+      clock = 4_500;
+      calls[0].resolve({ ...analysis(), confidence: 0.7 });
+      await service.waitForIdle();
+
+      service.onTurnEnded(turnEnded("t2", "回复二", "a1", "第二个问题"));
+      await tick();
+      calls[1].reject(new Error("分析超时"));
+      await service.waitForIdle();
+
+      // t4 ends while t3 is being analyzed: t3's result is never applied.
+      service.onTurnEnded(turnEnded("t3", "回复三", "a1", "第三个问题"));
+      await tick();
+      service.onTurnEnded(turnEnded("t4", "回复四", "a1", "第四个问题"));
+      await tick();
+      calls[2].resolve(analysis());
+      await tick();
+      calls[3].resolve({ ...analysis(), confidence: 0.8 });
+      await service.waitForIdle();
+
+      expect(service.reanalyze("a1").ok).toBe(true);
+      await tick();
+      calls[4].resolve({ ...analysis(), confidence: 0.6 });
+      await service.waitForIdle();
+
+      const runs = service.detail("a1")?.analysisRuns ?? [];
+      expect(
+        runs.map((run) => [run.userInput, run.outcome, run.confidence, run.reanalysis]),
+      ).toEqual([
+        ["第四个问题", "applied", 0.6, true],
+        ["第四个问题", "applied", 0.8, false],
+        ["第三个问题", "superseded", 0.9, false],
+        ["第二个问题", "failed", null, false],
+        ["第一个问题", "applied", 0.7, false],
+      ]);
+      expect(runs[3].error).toContain("分析超时");
+      expect(runs[4]).toMatchObject({ startedAt: 1_000, durationMs: 3_500, status: "completed" });
+
+      const full = service.analysisRun("a1", runs[4].id);
+      expect(full?.analysis?.confidence).toBe(0.7);
+      expect(full?.newTurns).toBe(1);
+      expect(full?.inputChars).toBeGreaterThan(0);
+      expect(service.analysisRun("other", runs[4].id)).toBeNull();
     });
   });
 });

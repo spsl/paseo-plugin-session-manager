@@ -111,6 +111,25 @@ async function executable(path: string): Promise<boolean> {
   }
 }
 
+/** `git rev-parse HEAD` of a workspace; null on non-git directories or any failure. */
+export async function gitHeadOf(cwd: string): Promise<string | null> {
+  const trimmed = cwd.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const result = await spawnBounded({
+    program: "git",
+    args: ["-C", trimmed, "rev-parse", "HEAD"],
+    timeoutMs: 5_000,
+    outputLimit: 4 * 1024,
+  });
+  if (result.code !== 0 || result.timedOut) {
+    return null;
+  }
+  const head = result.stdout.trim();
+  return /^[0-9a-f]{7,40}$/.test(head) ? head : null;
+}
+
 /** The CLI the daemon shipped with (`PASEO_CLI`), then PATH and usual install dirs. */
 export async function findPaseoCli(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   const onPath = (env.PATH ?? "").split(delimiter).filter((dir) => dir !== "");

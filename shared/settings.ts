@@ -31,6 +31,15 @@ export const ANALYZER_SETTINGS = defineSettings({
      * sub-agents (label `team`) were interrupted, so it resumes the flow.
      */
     teamRecovery: z.enum(["notify", "off"]).default("notify"),
+    /**
+     * After a code-changing turn completes: "suggest" only marks the card,
+     * "auto" also sends the review request when the session is idle.
+     */
+    reviewTrigger: z.enum(["off", "suggest", "auto"]).default("suggest"),
+    /** Which changes the review sub-agent should look at. */
+    reviewScope: z.enum(["uncommitted", "since_last_review", "session"]).default("since_last_review"),
+    /** The message sent to the session to start a review; empty uses the built-in template. */
+    reviewPrompt: z.string().default(""),
     /** Board column width as a percentage of the width that would fill the screen. */
     columnWidthPercent: z.number().int().min(30).max(500).default(90),
     /** Comma/whitespace separated label keys (or key=value); matching agents are hidden and never analyzed. */
@@ -56,6 +65,9 @@ export const DEFAULT_ANALYZER_SETTINGS: AnalyzerSettings = {
   closedRetentionDays: 7,
   autoResume: "attention",
   teamRecovery: "notify",
+  reviewTrigger: "suggest",
+  reviewScope: "since_last_review",
+  reviewPrompt: "",
   columnWidthPercent: 90,
   excludedLabelKeys: "herald.role",
 };

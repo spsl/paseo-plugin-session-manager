@@ -25,6 +25,7 @@ import {
   patchForget,
   patchManualStatus,
   patchReanalyze,
+  patchReopen,
   patchResume,
   pollIntervalFor,
   projectCardCounts,
@@ -947,6 +948,25 @@ describe("optimistic patches", () => {
     expect(next.sessions[0]).toMatchObject({ resumeState: "resuming", resumeError: null });
     const live = makeSession({ id: "l" });
     expect(patchResume({ sessions: [live] }, "l").sessions[0]).toEqual(live);
+  });
+
+  it("patchReopen shows 重新打开中 only on closed sessions", () => {
+    const closed = makeSession({
+      id: "c",
+      liveness: "closed",
+      column: "closed",
+      resumeState: "failed",
+      resumeError: "重新打开失败：x",
+    });
+    const next = patchReopen({ sessions: [closed] }, "c");
+    expect(next.sessions[0]).toMatchObject({
+      liveness: "closed",
+      column: "closed",
+      resumeState: "resuming",
+      resumeError: null,
+    });
+    const live = makeSession({ id: "l" });
+    expect(patchReopen({ sessions: [live] }, "l").sessions[0]).toEqual(live);
   });
 
   it("patchDismissResume drops the card into the closed column", () => {

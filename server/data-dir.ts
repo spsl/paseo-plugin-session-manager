@@ -20,3 +20,8 @@ export function statePath(): string {
 export function draftsPath(): string {
   return join(pluginDir(), "drafts.json");
 }
+
+/** Per-turn digests (history.db) live next to state.json. */
+export function historyPath(): string {
+  return join(pluginDir(), "history.db");
+}

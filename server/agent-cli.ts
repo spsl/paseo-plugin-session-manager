@@ -50,6 +50,24 @@ export function agentThinkingArgs(agentId: string, thinkingOptionId: string): st
   return ["agent", "update", agentId, "--thinking", thinkingOptionId];
 }
 
+export function agentReloadArgs(agentId: string): string[] {
+  return ["agent", "reload", agentId];
+}
+
+/**
+ * `paseo agent reload` sends refresh_agent_request: the daemon unarchives the
+ * agent when needed, then reloads or resumes it. The plugin SDK has no
+ * unarchive path — a timeline refetch loads archived agents read-only.
+ */
+export async function reloadAgentViaCli(
+  agentId: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!isSafeAgentId(agentId)) {
+    return { ok: false, reason: "无效的会话 ID" };
+  }
+  return runPaseoAgentCli(agentReloadArgs(agentId), "重新打开");
+}
+
 export async function setAgentModeViaCli(
   agentId: string,
   modeId: string,

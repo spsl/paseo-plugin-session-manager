@@ -80,6 +80,22 @@ export const MAX_DONE_ITEMS = 3;
 /** Max persisted 之前 entries per session. */
 export const MAX_HISTORY_ENTRIES = 40;
 
+/** Max characters of one turn's step name on the flow chart. */
+export const TURN_STEP_MAX_LENGTH = 30;
+
+/** Max characters kept of one turn's model digest. */
+export const TURN_DIGEST_MAX_LENGTH = 600;
+
+/** Step and digest the analyzer returns for one newly analyzed turn. */
+export const TurnDigestSchema = z.object({
+  turnId: z.string(),
+  /** One verb-led line on what the turn did (≤30 chars). */
+  step: z.string(),
+  /** 300–500 char digest, or "" when the reply is short enough to store raw. */
+  digest: z.string(),
+});
+export type TurnDigest = z.infer<typeof TurnDigestSchema>;
+
 export const AnalysisSchema = z.object({
   /** A concise, model-generated description of the current task. */
   title: z.string(),
@@ -98,6 +114,15 @@ export const AnalysisSchema = z.object({
   done: z.array(z.string()).optional(),
   /** One short sentence on what the session is doing or waiting on. Absent on older analyses. */
   now: z.string().optional(),
+  /** The analyzer's review suggestion; absent on older analyses or when reviewTrigger is off. */
+  review: z
+    .object({
+      suggested: z.boolean(),
+      reason: z.string(),
+    })
+    .optional(),
+  /** Per-turn step/digest for the newly analyzed turns; absent on older analyses. */
+  turnDigests: z.array(TurnDigestSchema).optional(),
 });
 export type Analysis = z.infer<typeof AnalysisSchema>;
 
@@ -140,6 +165,41 @@ export const DECLARED_KIND_LABELS: Record<DeclaredKind, string> = {
   failed: "失败",
 };
 
+/** Counts from the verify reply's first line (「审查复核：成立 X 条，不成立 Y 条，存疑 Z 条」). */
+export const ReviewVerdictSchema = z.object({
+  valid: z.number(),
+  invalid: z.number(),
+  unsure: z.number(),
+});
+export type ReviewVerdict = z.infer<typeof ReviewVerdictSchema>;
+
+export const REVIEW_PHASES = [
+  "suggested",
+  "requested",
+  "reviewing",
+  "verifying",
+  "awaiting_confirmation",
+  "failed",
+  "interrupted",
+] as const;
+export type ReviewPhase = (typeof REVIEW_PHASES)[number];
+export const ReviewPhaseSchema = z.enum(REVIEW_PHASES);
+
+/** The review progress the board shows; null means no review is or was tracked. */
+export const ReviewViewSchema = z.object({
+  phase: ReviewPhaseSchema,
+  /** The request id, also the value of the `session-manager.review` label. */
+  requestId: z.string().nullable(),
+  /** The suggestion reason, or the failure/interruption reason. */
+  reason: z.string().nullable(),
+  reviewerIds: z.array(z.string()),
+  verdict: ReviewVerdictSchema.nullable(),
+  /** The verify turn edited files despite the read-only instruction. */
+  editedDuringVerify: z.boolean(),
+  requestedAt: z.number().nullable(),
+});
+export type ReviewView = z.infer<typeof ReviewViewSchema>;
+
 export const TurnSchema = z.object({
   id: z.string(),
   /** Stable content key; a turn with the same id OR dedupeKey updates in place. */
@@ -151,6 +211,10 @@ export const TurnSchema = z.object({
   contextIncomplete: z.boolean(),
   /** Absent on turns recorded before declarations were parsed. */
   declared: DeclaredSchema.nullable().optional(),
+  /** edit/write tool calls in this turn; absent on older turns means 0. */
+  editCount: z.number().optional(),
+  /** Parsed 「审查复核：…」 first line; absent on older turns. */
+  reviewVerdict: ReviewVerdictSchema.nullable().optional(),
 });
 export type Turn = z.infer<typeof TurnSchema>;
 
@@ -206,7 +270,7 @@ export const SessionViewSchema = z.object({
   deferEndedAt: z.number().nullable(),
   /** Set when a Paseo restart closed the session mid-task (working or awaiting permission). */
   interruptedAt: z.number().nullable(),
-  /** Runtime resume progress for dormant sessions; always idle after a reload. */
+  /** Runtime resume/reopen progress for dormant and closed sessions; always idle after a reload. */
   resumeState: ResumeStateSchema,
   resumeError: z.string().nullable(),
   titleState: TitleStateSchema,
@@ -218,6 +282,8 @@ export const SessionViewSchema = z.object({
   lastUserInput: z.string().nullable(),
   /** The latest turn's self-declared result line, if any. */
   declared: DeclaredSchema.nullable(),
+  /** Code-review progress derived from the record; null when nothing applies. */
+  review: ReviewViewSchema.nullable(),
   /** Latest model verdict, without lifecycle or user override applied. */
   modelStatus: AnalysisStatusSchema,
   /** The status the live board presents before the closed column is applied. */
@@ -227,10 +293,97 @@ export const SessionViewSchema = z.object({
 });
 export type SessionView = z.infer<typeof SessionViewSchema>;
 
+/** Max analysis calls kept per session in history.db. */
+export const MAX_ANALYSIS_RUNS = 50;
+
+/**
+ * What became of one analyzer call: its result was applied, the call failed,
+ * a newer turn arrived first, or the session was archived meanwhile.
+ */
+export const ANALYSIS_RUN_OUTCOMES = ["applied", "failed", "superseded", "discarded"] as const;
+export type AnalysisRunOutcome = (typeof ANALYSIS_RUN_OUTCOMES)[number];
+
+/** One analyzer call as listed in the detail pane's 分析记录. */
+export const AnalysisRunSummarySchema = z.object({
+  id: z.number(),
+  /** The last turn the call analyzed. */
+  turnId: z.string(),
+  startedAt: z.number(),
+  durationMs: z.number(),
+  /** Head (≤300 chars) of that turn's user input; null when it had none. */
+  userInput: z.string().nullable(),
+  /** The same turn had been analyzed before (manual 重新分析 or a retry). */
+  reanalysis: z.boolean(),
+  /** Analyzer agent id (claude / codex / pi / magpie). */
+  agent: z.string(),
+  model: z.string(),
+  outcome: z.enum(ANALYSIS_RUN_OUTCOMES),
+  error: z.string().nullable(),
+  /** From the model's result; null when the call failed. */
+  confidence: z.number().nullable(),
+  status: AnalysisStatusSchema.nullable(),
+});
+export type AnalysisRunSummary = z.infer<typeof AnalysisRunSummarySchema>;
+
+/** One analyzer call with its full result, fetched when a record is opened. */
+export const AnalysisRunSchema = AnalysisRunSummarySchema.extend({
+  /** JSON length of the analyzer input. */
+  inputChars: z.number(),
+  /** Turns sent as new (full text). */
+  newTurns: z.number(),
+  /** Stored turn digests sent along. */
+  digestCount: z.number(),
+  analysis: AnalysisSchema.nullable(),
+});
+export type AnalysisRun = z.infer<typeof AnalysisRunSchema>;
+
 export const SessionDetailSchema = SessionViewSchema.extend({
   turns: z.array(TurnSchema),
   firstUserMessage: z.string().nullable(),
   /** 之前 items, oldest first. */
   history: z.array(HistoryEntrySchema),
+  /** Analyzer calls, newest first (history.db). */
+  analysisRuns: z.array(AnalysisRunSummarySchema),
 });
 export type SessionDetail = z.infer<typeof SessionDetailSchema>;
+
+/** One sub_agent tool call spotted inside a turn's timeline. */
+export const TurnSubAgentSchema = z.object({
+  callId: z.string(),
+  /** subAgentType like "Explore"; the tool name when the provider didn't say. */
+  type: z.string(),
+  /** ≤200 chars. */
+  description: z.string(),
+  status: z.string(),
+});
+export type TurnSubAgent = z.infer<typeof TurnSubAgentSchema>;
+
+/** A Paseo child session attached to a turn or to the running tail of the flow chart. */
+export const FlowChildSchema = z.object({
+  id: z.string(),
+  createdAt: z.number(),
+  /** Board column label, e.g. 已完成. */
+  columnLabel: z.string(),
+  /** Self-declared result (「完成：…」) or title; null when neither exists yet. */
+  detail: z.string().nullable(),
+});
+export type FlowChild = z.infer<typeof FlowChildSchema>;
+
+/** One turn in the session flow chart and the per-turn digest list under it. */
+export const FlowTurnSchema = z.object({
+  turnId: z.string(),
+  /** 1-based position in the session's turn list. */
+  index: z.number(),
+  completedAt: z.number(),
+  /** User input head (≤300 chars), null when it wasn't captured. */
+  userInput: z.string().nullable(),
+  step: z.string().nullable(),
+  /** First 之前 entry of this turn — the title fallback after `step`. */
+  historyLabel: z.string().nullable(),
+  digest: z.string().nullable(),
+  outcome: z.string(),
+  subAgents: z.array(TurnSubAgentSchema),
+  /** Paseo child sessions created during this turn. */
+  children: z.array(FlowChildSchema),
+});
+export type FlowTurn = z.infer<typeof FlowTurnSchema>;

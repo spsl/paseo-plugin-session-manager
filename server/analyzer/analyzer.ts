@@ -15,6 +15,8 @@ export type AnalyzerRunConfig = AnalysisConfig & {
   /** Executable override from settings; empty means resolve from PATH. */
   command?: string;
   timeoutMs?: number;
+  /** Include the review.suggested field and rule in schema and prompt. */
+  review?: boolean;
 };
 
 /** An interface so the service can be tested with a fake. */
@@ -52,7 +54,7 @@ export class CliAnalyzer implements Analyzer {
     const schemaPath = join(directory, "analysis-schema.json");
     const outputPath = join(directory, "analysis-result.json");
     try {
-      const schema = buildAnalysisSchema();
+      const schema = buildAnalysisSchema(config.review === true);
       await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
       const invocation = buildAnalyzerInvocation({
         config,
@@ -64,7 +66,7 @@ export class CliAnalyzer implements Analyzer {
         program: invocation.program,
         args: invocation.args,
         cwd: directory,
-        input: buildAnalysisPrompt(input, schema, config.systemPrompt),
+        input: buildAnalysisPrompt(input, schema, config.systemPrompt, config.review === true),
         env: await buildAnalyzerEnv(invocation.program),
         timeoutMs: config.timeoutMs ?? DEFAULT_ANALYZER_TIMEOUT_MS,
         outputLimit: ANALYZER_OUTPUT_LIMIT,

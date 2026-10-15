@@ -33,6 +33,8 @@ const turn = (id: string, text = "out") => ({
   completedAt: 5,
   contextIncomplete: false,
   declared: null,
+  editCount: 0,
+  reviewVerdict: null,
 });
 
 describe("JsonStateStore", () => {
@@ -48,6 +50,7 @@ describe("JsonStateStore", () => {
       deferToQueue: true,
       titleState: { lastWritten: "x", userOwned: true, lastWriteError: null },
       analysisState: "ready",
+      timelineCursor: { length: 12, tailHash: "abc123" },
     });
     store.schedule(() => [record]);
     await store.flush();
@@ -121,6 +124,69 @@ describe("JsonStateStore", () => {
       resumeState: "idle",
       resumeError: null,
     });
+  });
+
+  it("round-trips review facts and defaults missing review fields", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    store.schedule(() => [
+      make("a", {
+        review: {
+          id: "rv_abc",
+          turnId: "t1",
+          trigger: "auto",
+          requestedAt: 10,
+          baseHead: "deadbeef",
+          reviewerIds: ["rev-1", "rev-2"],
+          verifiedTurnId: "t3",
+          verdict: { valid: 1, invalid: 2, unsure: 3 },
+          error: null,
+          closedAt: null,
+        },
+        reviewedThroughTurnId: "t1",
+        lastReviewHead: "deadbeef",
+        reviewDismissedTurnId: "t9",
+        turns: [
+          { ...turn("t1"), editCount: 4, reviewVerdict: { valid: 2, invalid: 0, unsure: 1 } },
+          { ...turn("t2"), reviewVerdict: { valid: "x" } as never },
+        ],
+      }),
+      make("b"),
+    ]);
+    await store.flush();
+    const [loaded, legacy] = await new JsonStateStore(path).load();
+    expect(loaded.review).toMatchObject({
+      id: "rv_abc",
+      turnId: "t1",
+      trigger: "auto",
+      baseHead: "deadbeef",
+      reviewerIds: ["rev-1", "rev-2"],
+      verdict: { valid: 1, invalid: 2, unsure: 3 },
+    });
+    expect(loaded.reviewedThroughTurnId).toBe("t1");
+    expect(loaded.lastReviewHead).toBe("deadbeef");
+    expect(loaded.reviewDismissedTurnId).toBe("t9");
+    expect(loaded.turns[0].editCount).toBe(4);
+    expect(loaded.turns[0].reviewVerdict).toEqual({ valid: 2, invalid: 0, unsure: 1 });
+    // Malformed verdicts drop to null instead of failing the turn.
+    expect(loaded.turns[1].reviewVerdict).toBeNull();
+    // Legacy records predate the review fields: they hydrate to null.
+    expect(legacy.review).toBeNull();
+    expect(legacy.reviewedThroughTurnId).toBeNull();
+    expect(legacy.lastReviewHead).toBeNull();
+    expect(legacy.reviewDismissedTurnId).toBeNull();
+  });
+
+  it("drops malformed review records but keeps the session", async () => {
+    const path = join(dir, "state.json");
+    const store = new JsonStateStore(path);
+    await store.save([make("a")]);
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    raw.sessions[0].review = { requestId: 3, trigger: "nope", reviewerIds: [1, "rev"] };
+    await writeFile(path, JSON.stringify(raw));
+    const [loaded] = await store.load();
+    expect(loaded.id).toBe("a");
+    expect(loaded.review).toBeNull();
   });
 
   it("round-trips declared results and the team notification marker", async () => {

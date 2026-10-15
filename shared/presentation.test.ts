@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  analysisRunOutcomeLabel,
   analysisStatusLabel,
   branchLabel,
   columnForStatus,
@@ -7,11 +8,15 @@ import {
   deferClockTimestamp,
   formatDeferRemaining,
   formatDeferUntil,
+  formatDuration,
   formatShortTimeAgo,
   formatStepTime,
+  latestRunNote,
   livenessLabel,
   nowLine,
   resumeStateLabel,
+  reviewBadgeLabel,
+  reviewBadgeTone,
   sessionTitle,
   workspaceLabel,
 } from "./presentation";
@@ -78,6 +83,19 @@ describe("board presentation", () => {
     expect(resumeStateLabel(makeSession({ resumeState: "failed" }))).toBeNull();
   });
 
+  it("labels closed sessions during reopen, and stays quiet when idle", () => {
+    expect(resumeStateLabel(makeSession({ liveness: "closed" }))).toBeNull();
+    expect(resumeStateLabel(makeSession({ liveness: "closed", resumeState: "queued" }))).toBe(
+      "重新打开中…",
+    );
+    expect(resumeStateLabel(makeSession({ liveness: "closed", resumeState: "resuming" }))).toBe(
+      "重新打开中…",
+    );
+    expect(resumeStateLabel(makeSession({ liveness: "closed", resumeState: "failed" }))).toBe(
+      "重新打开失败",
+    );
+  });
+
   it("formats the defer countdown and resume time", () => {
     const now = new Date(2026, 5, 15, 10, 30, 0).getTime();
     expect(formatDeferRemaining(now - 1, now)).toBe("即将恢复");
@@ -142,6 +160,41 @@ describe("nowLine", () => {
     expect(blocked).toEqual({ tone: "blocked", text: "标题：已完成，等你确认", detail: "卡在：缺少接口文档" });
   });
 
+  it("shows the review phase with its reason while idle", () => {
+    const review = {
+      phase: "awaiting_confirmation" as const,
+      requestId: "rv_1",
+      reason: null,
+      reviewerIds: ["r1"],
+      verdict: { valid: 2, invalid: 1, unsure: 0 },
+      editedDuringVerify: false,
+      requestedAt: 1,
+    };
+    const line = nowLine(makeSession({ review }), live);
+    expect(line.tone).toBe("waiting");
+    expect(line.text).toBe("待确认审查结果（成立 2 / 不成立 1 / 存疑 0）");
+    const suggested = nowLine(
+      makeSession({ review: { ...review, phase: "suggested", reason: "刚完成了功能改动" } }),
+      live,
+    );
+    expect(suggested).toEqual({ tone: "idle", text: "建议代码审查", detail: "刚完成了功能改动" });
+    const failed = nowLine(
+      makeSession({ review: { ...review, phase: "failed", reason: "原会话没有创建审查子 Agent" } }),
+      live,
+    );
+    expect(failed).toEqual({
+      tone: "blocked",
+      text: "审查未启动",
+      detail: "原会话没有创建审查子 Agent",
+    });
+    // A running turn still wins over the review marker.
+    const busy = nowLine(
+      makeSession({ lifecycle: "working", review }),
+      { ...live, running: true, userText: "干活" },
+    );
+    expect(busy.tone).toBe("working");
+  });
+
   it("covers closed, dormant and not-yet-analyzed sessions", () => {
     expect(nowLine(makeSession({ liveness: "closed", analysis }), null)).toMatchObject({ text: "会话已关闭" });
     expect(nowLine(makeSession({ liveness: "dormant", interruptedAt: 5 }), null).text).toBe(
@@ -154,10 +207,65 @@ describe("nowLine", () => {
   });
 });
 
+describe("review badges", () => {
+  const review = (phase: Parameters<typeof reviewBadgeLabel>[0]["phase"]) => ({
+    phase,
+    requestId: "rv_1",
+    reason: null,
+    reviewerIds: [] as string[],
+    verdict: null,
+    editedDuringVerify: false,
+    requestedAt: 1,
+  });
+
+  it("labels every phase in Chinese with a tone", () => {
+    expect(reviewBadgeLabel(review("suggested"))).toBe("建议代码审查");
+    expect(reviewBadgeLabel(review("requested"))).toBe("已请求审查");
+    expect(reviewBadgeLabel(review("reviewing"))).toBe("审查中");
+    expect(reviewBadgeLabel(review("verifying"))).toBe("复核中");
+    expect(reviewBadgeLabel(review("awaiting_confirmation"))).toBe("待确认审查结果");
+    expect(reviewBadgeLabel(review("failed"))).toBe("审查未启动");
+    expect(reviewBadgeLabel(review("interrupted"))).toBe("审查被中断");
+    expect(reviewBadgeTone("interrupted")).toBe("danger");
+    expect(reviewBadgeTone("suggested")).toBe("accent");
+    // Verdict counts appear once the verify reply was parsed.
+    expect(
+      reviewBadgeLabel({
+        ...review("awaiting_confirmation"),
+        verdict: { valid: 3, invalid: 0, unsure: 1 },
+      }),
+    ).toBe("待确认审查结果（成立 3 / 不成立 0 / 存疑 1）");
+  });
+});
+
 describe("formatStepTime", () => {
   it("shows the clock today and the date otherwise", () => {
     const now = new Date(2026, 9, 13, 22, 0).getTime();
     expect(formatStepTime(new Date(2026, 9, 13, 9, 5).getTime(), now)).toBe("09:05");
     expect(formatStepTime(new Date(2026, 9, 12, 23, 59).getTime(), now)).toBe("10-12 23:59");
+  });
+});
+
+describe("analysis run labels", () => {
+  it("formats call durations", () => {
+    expect(formatDuration(800)).toBe("0.8 秒");
+    expect(formatDuration(42_400)).toBe("42 秒");
+    expect(formatDuration(120_000)).toBe("2 分");
+    expect(formatDuration(125_000)).toBe("2 分 5 秒");
+  });
+
+  it("notes the newest call's confidence, or that it failed", () => {
+    expect(latestRunNote([{ confidence: 0.86 }, { confidence: 0.5 }], null)).toBe("置信度 86%");
+    expect(latestRunNote([{ confidence: null }, { confidence: 0.5 }], { confidence: 0.5 })).toBe(
+      "最近一次失败",
+    );
+    // Analyses from before calls were logged.
+    expect(latestRunNote([], { confidence: 0.9 })).toBe("置信度 90%");
+    expect(latestRunNote([], null)).toBeNull();
+  });
+
+  it("labels what became of a call", () => {
+    expect(analysisRunOutcomeLabel("applied")).toBe("已采用");
+    expect(analysisRunOutcomeLabel("superseded")).toBe("未采用：已有更新的轮次");
   });
 });

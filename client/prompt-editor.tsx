@@ -19,6 +19,10 @@ type Props = {
   onSave(next: string): void;
   theme: PluginTheme;
   compact: boolean;
+  /** Overrides the input placeholder shown when the draft is empty. */
+  placeholder?: string;
+  /** Overrides the note under the input. */
+  note?: string;
 };
 
 const PLACEHOLDER =
@@ -71,7 +75,7 @@ export function PromptEditor(props: Props) {
             autoCapitalize="none"
             spellCheck={false}
             maxLength={MAX_SYSTEM_PROMPT_LENGTH}
-            placeholder={PLACEHOLDER}
+            placeholder={props.placeholder ?? PLACEHOLDER}
             placeholderTextColor={colors.foregroundMuted}
             style={{
               flex: 1,
@@ -89,7 +93,7 @@ export function PromptEditor(props: Props) {
             }}
           />
           <Text style={{ color: colors.foregroundMuted, fontSize: 12, lineHeight: 17 }}>
-            自定义内容会用于后续分析；正在执行的分析继续使用启动时的配置。
+            {props.note ?? "自定义内容会用于后续分析；正在执行的分析继续使用启动时的配置。"}
           </Text>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Pressable

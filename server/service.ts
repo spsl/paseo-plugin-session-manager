@@ -5,19 +5,28 @@ import {
 import { isExcludedAgent, parseExclusions, type AgentExclusion } from "../shared/agent-filter";
 import type { AnalyzerSettings } from "../shared/settings";
 import {
+  DECLARED_KIND_LABELS,
   isActiveLiveness,
   type Analysis,
+  type AnalysisRun,
+  type AnalysisRunOutcome,
   type Declared,
   type AnalysisStatus,
+  type FlowChild,
+  type FlowTurn,
   type SessionDetail,
   type SessionView,
   type Turn,
 } from "../shared/types";
+import { COLUMNS } from "../shared/presentation";
 import { CliAnalyzer, DEFAULT_ANALYZER_TIMEOUT_MS, type Analyzer } from "./analyzer/analyzer";
 import { MagpieAnalyzer } from "./analyzer/magpie";
 import type { MagpieRunConfig } from "./analyzer/magpie";
-import type { AnalyzerInput } from "./analyzer/prompt";
-import { resolveAnalyzerBinary } from "./cli";
+import { newTurnIds, type AnalyzerInput, type AnalyzerTurnDigest } from "./analyzer/prompt";
+import { buildFlow, type FlowTurnInput } from "./flow";
+import type { DigestStore, NewAnalysisRun } from "./digest-store";
+import { gitHeadOf, resolveAnalyzerBinary } from "./cli";
+import { reloadAgentViaCli } from "./agent-cli";
 import type {
   AgentListEntry,
   ArchivedEvent,
@@ -33,15 +42,33 @@ import type {
 import { applyAgentSnapshot, applyHookAgent, applyLabels, newRecord } from "./lifecycle";
 import { projectDetail, projectView } from "./projection";
 import {
+  MAX_REVIEWERS,
   MAX_TURNS_PER_SESSION,
   copyRecord,
   withTurnHistory,
   type SessionRecord,
   type StateStore,
 } from "./store";
+import {
+  REVIEW_LABEL,
+  renderReviewPrompt,
+  reviewEligibility,
+  reviewInProgress,
+  reviewRequestBlock,
+  reviewTurnVerifies,
+  reviewerFinished,
+  type ReviewLookup,
+} from "./review";
 import { decideTitleWrite, writeTitleViaCli } from "./title-writeback";
 import { interruptedTeamGroups, teamRecoveryMessage, type TeamRecoveryGroup } from "./team-recovery";
-import { firstUserMessageFrom, turnFromTurnEnded, turnsFromTimelineEntries } from "./turns";
+import {
+  firstUserMessageFrom,
+  stableTextHash,
+  timelineCursorOf,
+  turnFromTurnEnded,
+  turnStartFromCursor,
+  turnsFromTimelineEntries,
+} from "./turns";
 import { normalizeTitle } from "../shared/types";
 import { sessionDisplayName } from "../shared/card";
 import type { Notifier, NotifyAgent } from "./notifier";
@@ -60,7 +87,9 @@ const SHUTDOWN_CLOSE_WINDOW_MS = 30_000;
 const RESUME_CONCURRENCY = 3;
 const RESUME_TIMEOUT_MS = 60_000;
 const RESUME_TIMEOUT_TEXT = "恢复超时（60 秒）";
+const REOPEN_TIMEOUT_TEXT = "重新打开超时（60 秒）";
 const TEAM_NOTIFY_TIMEOUT_MS = 30_000;
+const REVIEW_SEND_TIMEOUT_MS = 30_000;
 /** Another plugin's helper agents are never carded or announced, whatever the board setting says. */
 const NEVER_NOTIFY = parseExclusions("herald.role");
 
@@ -80,8 +109,14 @@ export type ServiceDeps = {
   /** Returns a human-readable problem with the analyzer setup, or null. */
   checkAnalyzer?: (config: AnalysisConfig, command: string) => Promise<string | null>;
   now?: () => number;
+  /** `git rev-parse HEAD` for the review baseline; injectable for tests. */
+  headOf?: (cwd: string) => Promise<string | null>;
   /** Cards and announcements; absent means none are produced. */
   notifier?: Notifier;
+  /** history.db per-turn digests; absent or disabled keeps everything working. */
+  digests?: DigestStore;
+  /** `paseo agent reload` for archived sessions; injectable for tests. */
+  reloadAgentCli?: (agentId: string) => Promise<MutationResult>;
 };
 
 export type MutationResult = { ok: boolean; reason?: string };
@@ -211,6 +246,12 @@ export class SessionManagerService {
   private async loadRecords(): Promise<number> {
     const restored = await this.deps.store.load();
     const count = this.restore(restored);
+    // history.db rows outlive state.json records; drop sessions the state lost.
+    // Skipped on an empty load: an unreadable or missing state.json must never
+    // wipe the digest store, which keeps its own longer-lived history.
+    if (restored.length > 0) {
+      this.deps.digests?.pruneOrphans(new Set(this.records.keys()));
+    }
     if (count > 0) {
       this.persist();
     }
@@ -381,6 +422,7 @@ export class SessionManagerService {
 
   private removeRecord(id: string): void {
     this.records.delete(id);
+    this.deps.digests?.removeSession(id);
     this.queued.delete(id);
     const index = this.queue.indexOf(id);
     if (index >= 0) {
@@ -425,6 +467,7 @@ export class SessionManagerService {
       if (fresh.agent.labels) {
         applyLabels(record, fresh.agent.labels);
       }
+      this.pruneReviewerLabels(record);
       if (this.isExcludedRecord(record)) {
         this.removeRecord(id);
       } else {
@@ -435,10 +478,47 @@ export class SessionManagerService {
     }
   }
 
+  /** A child labeled for another review leaves an open review's reviewerIds. */
+  private pruneReviewerLabels(record: SessionRecord): void {
+    const tagged = record.labels[REVIEW_LABEL];
+    if (tagged === undefined) {
+      return;
+    }
+    let changed = false;
+    for (const parent of this.records.values()) {
+      const review = parent.review;
+      if (!review || review.closedAt !== null) {
+        continue;
+      }
+      const index = review.reviewerIds.indexOf(record.id);
+      if (index >= 0 && tagged !== review.id) {
+        review.reviewerIds.splice(index, 1);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.persist();
+    }
+  }
+
   onCreated(event: CreatedEvent): void {
     const record = this.ensure(event.agent);
     record.liveness = "live";
     record.updatedAt = this.now();
+    // A child created while its parent's review is open counts as a reviewer.
+    const parentId = record.parentAgentId;
+    if (parentId && parentId !== record.id) {
+      const review = this.records.get(parentId)?.review;
+      if (
+        review &&
+        review.closedAt === null &&
+        review.error === null &&
+        !review.reviewerIds.includes(record.id) &&
+        review.reviewerIds.length < MAX_REVIEWERS
+      ) {
+        review.reviewerIds.push(record.id);
+      }
+    }
     this.persist();
   }
 
@@ -450,6 +530,17 @@ export class SessionManagerService {
     record.interruptedAt = null;
     record.resumeState = "idle";
     record.resumeError = null;
+    // A reply after the verdict closes the review; a still-running reviewer
+    // (e.g. a second profile) keeps it open.
+    const review = record.review;
+    if (
+      review &&
+      review.closedAt === null &&
+      review.verifiedTurnId !== null &&
+      review.reviewerIds.every((id) => reviewerFinished(this.records.get(id)))
+    ) {
+      review.closedAt = this.now();
+    }
     record.updatedAt = this.now();
     this.persist();
   }
@@ -547,19 +638,31 @@ export class SessionManagerService {
         record.firstUserMessageKnown = true;
       }
     }
-    const turn = turnFromTurnEnded(event.timeline, event.outcome, event.turnId, now);
-    if (!turn) {
+    const ended = turnFromTurnEnded(
+      event.timeline,
+      event.outcome,
+      event.turnId,
+      now,
+      turnStartFromCursor(record.timelineCursor, event.timeline),
+    );
+    // Items already in the timeline belong to turns that have ended; even a
+    // canceled or empty turn still advances the boundary for the next one.
+    record.timelineCursor = timelineCursorOf(event.timeline);
+    if (!ended) {
       this.persist();
       return;
     }
+    const { turn, subAgents } = ended;
     const lastTurn = record.turns.at(-1);
     const byId = record.turns.findIndex((candidate) => candidate.id === turn.id);
     let enqueue = false;
+    let wrote = false;
     if (byId >= 0) {
       const existing = record.turns[byId];
       if (existing.dedupeKey !== turn.dedupeKey) {
         record.turns[byId] = { ...turn, completedAt: now };
         enqueue = byId === record.turns.length - 1;
+        wrote = true;
       }
     } else if (lastTurn && lastTurn.dedupeKey === turn.dedupeKey) {
       // Same content under a different id: a repeated event, nothing to do.
@@ -567,6 +670,11 @@ export class SessionManagerService {
       record.turns.push(turn);
       record.turns = record.turns.slice(-MAX_TURNS_PER_SESSION);
       enqueue = true;
+      wrote = true;
+    }
+    if (wrote) {
+      const stored = byId >= 0 ? record.turns[byId] : turn;
+      this.deps.digests?.upsertTurn(record.id, stored, subAgents, now);
     }
     if (enqueue) {
       record.completedAt = turn.completedAt;
@@ -575,7 +683,28 @@ export class SessionManagerService {
       this.beginTurnCard(record, turn.id);
       this.enqueue(record.id);
     }
+    this.markReviewTurn(record, turn);
     this.persist();
+  }
+
+  /**
+   * A parent turn ended: when every reviewer has finished and this turn started
+   * after them (or the reply itself carried the verdict line), record the verify.
+   */
+  private markReviewTurn(record: SessionRecord, turn: Turn): void {
+    const review = record.review;
+    if (!review || review.closedAt !== null || review.error !== null) {
+      return;
+    }
+    if (review.verifiedTurnId === null) {
+      if (reviewTurnVerifies(review, turn, this.reviewLookup())) {
+        review.verifiedTurnId = turn.id;
+        review.verdict = turn.reviewVerdict ?? null;
+      }
+    } else if (review.verdict === null && turn.reviewVerdict) {
+      // A later reply can still carry the verdict line; keep the boundary turn.
+      review.verdict = turn.reviewVerdict;
+    }
   }
 
   onClosed(event: ClosedEvent): void {
@@ -712,12 +841,32 @@ export class SessionManagerService {
         firstUserMessage: record.firstUserMessage,
       },
       turns: record.turns.slice(-5).map((turn) => ({ ...turn })),
+      digests: this.digestEntries(record.id),
       previousAnalysis: record.analysis ? copyRecord(record).analysis : null,
       history: record.history
         .filter((entry) => entry.turnId !== targetTurnId)
         .map((entry) => entry.text),
       historyTurnId,
     };
+  }
+
+  /** Stored digests of this session's turns, oldest first (history.db). */
+  private digestEntries(sessionId: string): AnalyzerTurnDigest[] {
+    const rows = this.deps.digests?.listTurns(sessionId) ?? [];
+    const entries: AnalyzerTurnDigest[] = [];
+    for (const row of rows) {
+      if (row.digest === null) {
+        continue;
+      }
+      entries.push({
+        id: row.turnId,
+        completedAt: row.completedAt,
+        userInput: row.userInput,
+        step: row.step,
+        digest: row.digest,
+      });
+    }
+    return entries;
   }
 
   private runConfig(): MagpieRunConfig & { command: string; timeoutMs: number } {
@@ -730,12 +879,14 @@ export class SessionManagerService {
         timeoutMs: (settings.timeoutSeconds || DEFAULT_ANALYZER_TIMEOUT_MS / 1000) * 1000,
         baseUrl: settings.magpieBaseUrl.trim() || undefined,
         apiKey: settings.magpieApiKey,
+        review: settings.reviewTrigger !== "off",
       };
     }
     return {
       ...config,
       command: settings.command,
       timeoutMs: (settings.timeoutSeconds || DEFAULT_ANALYZER_TIMEOUT_MS / 1000) * 1000,
+      review: settings.reviewTrigger !== "off",
     };
   }
 
@@ -759,43 +910,88 @@ export class SessionManagerService {
       return;
     }
     // Reanalyzing a turn reuses its boundary, so the same turns count as new.
-    // With no other history yet (older sessions) every stored turn counts as new.
+    // Once an analysis has landed, its turn stays the boundary for the next
+    // run — a run that recorded no history (done=[]) must not re-mark the
+    // already-digested turns as new.
     const reanalyzing = record.analyzedTurnId === targetTurnId;
-    const hasOtherHistory = record.history.some((entry) => entry.turnId !== targetTurnId);
-    const historyTurnId = !hasOtherHistory
-      ? null
-      : reanalyzing
-        ? record.historyBaseTurnId
-        : record.analyzedTurnId;
+    const historyTurnId =
+      record.analyzedTurnId === null
+        ? null
+        : reanalyzing
+          ? record.historyBaseTurnId
+          : record.analyzedTurnId;
     record.analysisState = "running";
     record.analysisError = null;
     let result: Analysis | null = null;
     let failure: string | null = null;
+    /** The boundary and content keys the input was built with — write-back filters on them. */
+    let inputNewIds: ReadonlySet<string> = new Set();
+    const inputDedupe = new Map<string, string>();
+    // Every call lands in 分析记录, whatever becomes of its result.
+    const run: Omit<NewAnalysisRun, "outcome" | "error" | "analysis"> = {
+      turnId: targetTurnId,
+      startedAt: this.now(),
+      durationMs: 0,
+      userInput: record.turns.at(-1)?.userInput ?? null,
+      reanalysis: reanalyzing,
+      agent: "",
+      model: "",
+      inputChars: 0,
+      newTurns: 0,
+      digestCount: 0,
+    };
     try {
       const config = this.runConfig();
-      result = await this.analyzerFor(config.agent).analyze(
-        this.buildInput(record, targetTurnId, historyTurnId),
-        config,
-      );
+      run.agent = config.agent;
+      run.model = config.model;
+      const input = this.buildInput(record, targetTurnId, historyTurnId);
+      inputNewIds = newTurnIds(input.turns, historyTurnId);
+      for (const turn of input.turns) {
+        inputDedupe.set(turn.id, turn.dedupeKey);
+      }
+      run.inputChars = JSON.stringify(input).length;
+      run.newTurns = inputNewIds.size;
+      run.digestCount = input.digests?.length ?? 0;
+      console.debug(`[session-manager] analysis input chars=${run.inputChars} session=${id}`);
+      result = await this.analyzerFor(config.agent).analyze(input, config);
     } catch (error) {
       failure = describeAnalysisError(error);
     }
+    run.durationMs = this.now() - run.startedAt;
+    const logRun = (outcome: AnalysisRunOutcome): void => {
+      this.deps.digests?.recordRun(id, {
+        ...run,
+        outcome: result ? outcome : "failed",
+        error: failure,
+        analysis: result,
+      });
+    };
     const current = this.records.get(id);
     if (!current || current.turns.at(-1)?.id !== targetTurnId) {
-      // A newer turn arrived: its card replaces this one.
+      // A newer turn arrived: its card replaces this one. A removed session
+      // logs nothing — its rows are already gone.
+      if (current) {
+        logRun("superseded");
+      }
       this.finishTurnCard(id, targetTurnId, "superseded");
       return;
     }
     if (current.liveness === "archived") {
+      logRun("discarded");
       this.settleDropped(current);
       current.analysisState = current.analysis ? "ready" : "awaiting_output";
       this.persist();
       this.finishTurnCard(id, targetTurnId, "failed", "会话已归档，已跳过分析");
       return;
     }
+    logRun("applied");
     if (result) {
       const turn = current.turns.at(-1);
-      current.analysis = result;
+      // turnDigests only belongs in history.db: keeping it off record.analysis
+      // avoids persisting it, pushing it to clients, and sending it back to the
+      // model inside previousAnalysis.
+      const { turnDigests, ...analysis } = result;
+      current.analysis = analysis;
       current.analysisState = "ready";
       current.analysisError = null;
       current.analyzedTurnId = targetTurnId;
@@ -806,13 +1002,34 @@ export class SessionManagerService {
         result.done,
       );
       current.historyBaseTurnId = historyTurnId;
+      // Superseded results return early above, so these digests never describe
+      // stale turns. Still drop entries for turns that were not sent as new,
+      // and only write when the stored row still holds the analyzed content.
+      for (const digest of turnDigests ?? []) {
+        if (!inputNewIds.has(digest.turnId)) {
+          continue;
+        }
+        const dedupeKey = inputDedupe.get(digest.turnId);
+        if (dedupeKey === undefined) {
+          continue;
+        }
+        this.deps.digests?.writeAnalysis(
+          id,
+          digest.turnId,
+          dedupeKey,
+          digest.step,
+          digest.digest,
+          this.now(),
+        );
+      }
       this.persist();
       this.finishTurnCard(id, targetTurnId, {
-        analysis: result,
+        analysis,
         turnOutcome: turn?.outcome ?? "completed",
         declared: turn?.declared ?? null,
       });
       void this.maybeWriteBackTitle(id, result.title);
+      void this.maybeAutoReview(id, targetTurnId);
     } else {
       current.analysisState = "failed";
       current.analysisError = failure;
@@ -999,6 +1216,174 @@ export class SessionManagerService {
       return { ok: false, reason: "会话仍在运行，无法移除" };
     }
     this.records.delete(id);
+    this.deps.digests?.removeSession(id);
+    this.persist();
+    return { ok: true };
+  }
+
+  // ---- code review --------------------------------------------------------
+
+  private reviewLookup(): ReviewLookup {
+    const records = this.records;
+    return {
+      get: (id) => records.get(id),
+      all: () => records.values(),
+      settings: this.deps.settings.current(),
+    };
+  }
+
+  /** Deterministic request id; also the `session-manager.review` label value. */
+  private reviewRequestId(record: SessionRecord, turnId: string): string {
+    return `rv_${stableTextHash(`${record.id}\0${turnId}`)}`;
+  }
+
+  /** The rendered request text the edit dialog prefills. */
+  previewReview(id: string): { text: string } {
+    const record = this.records.get(id);
+    const settings = this.deps.settings.current();
+    const requestId = record
+      ? this.reviewRequestId(record, record.turns.at(-1)?.id ?? "none")
+      : "rv_preview";
+    return {
+      text: renderReviewPrompt(settings.reviewPrompt, {
+        scope: settings.reviewScope,
+        requestId,
+        lastReviewHead: record?.lastReviewHead ?? null,
+      }),
+    };
+  }
+
+  /**
+   * Appends the review request to the session via `steer`. `expectedTurnId` is
+   * the auto trigger's snapshot of the latest turn: when the session moved on,
+   * the request stays a suggestion instead of steering mid-turn.
+   */
+  async requestReview(
+    id: string,
+    text?: string,
+    trigger: "auto" | "manual" = "manual",
+    expectedTurnId?: string,
+  ): Promise<MutationResult> {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    const block = reviewRequestBlock(record, this.records.values());
+    if (block) {
+      return { ok: false, reason: block };
+    }
+    const turnId = record.turns.at(-1)?.id;
+    if (!turnId) {
+      return { ok: false, reason: "暂无可审查的对话内容" };
+    }
+    if (expectedTurnId !== undefined && turnId !== expectedTurnId) {
+      return { ok: false, reason: "会话已有新的进展" };
+    }
+    const paseo = this.paseo;
+    if (!paseo) {
+      return { ok: false, reason: "尚未连接到 Paseo" };
+    }
+    const settings = this.deps.settings.current();
+    const requestId = this.reviewRequestId(record, turnId);
+    const body =
+      text?.trim() ||
+      renderReviewPrompt(settings.reviewPrompt, {
+        scope: settings.reviewScope,
+        requestId,
+        lastReviewHead: record.lastReviewHead,
+      });
+    const baseHead = await (this.deps.headOf ?? gitHeadOf)(record.cwd);
+    const fresh = this.records.get(id);
+    if (fresh !== record) {
+      return { ok: false, reason: "会话状态已变化，未发送" };
+    }
+    if (
+      trigger === "auto" &&
+      (fresh.lifecycle !== "idle" ||
+        fresh.pendingPermissionCount > 0 ||
+        fresh.turns.at(-1)?.id !== turnId)
+    ) {
+      return { ok: false, reason: "会话状态已变化，未发送" };
+    }
+    const requestedAt = this.now();
+    try {
+      await withTimeout(
+        paseo.agents.ref(id).send(body, { activeTurnBehavior: "steer" }),
+        REVIEW_SEND_TIMEOUT_MS,
+        "发送审查请求超时",
+      );
+    } catch (error) {
+      const message = describeAnalysisError(error);
+      fresh.review = {
+        id: requestId,
+        turnId,
+        trigger,
+        requestedAt,
+        baseHead,
+        reviewerIds: [],
+        verifiedTurnId: null,
+        verdict: null,
+        error: `审查请求发送失败：${message}`,
+        closedAt: null,
+      };
+      this.persist();
+      return { ok: false, reason: message };
+    }
+    fresh.review = {
+      id: requestId,
+      turnId,
+      trigger,
+      requestedAt,
+      baseHead,
+      reviewerIds: [],
+      verifiedTurnId: null,
+      verdict: null,
+      error: null,
+      closedAt: null,
+    };
+    fresh.reviewedThroughTurnId = turnId;
+    fresh.lastReviewHead = baseHead;
+    fresh.updatedAt = this.now();
+    this.persist();
+    return { ok: true };
+  }
+
+  /**
+   * Auto trigger: fires right after a successful analysis; the preconditions
+   * are re-checked inside requestReview before the send.
+   */
+  private async maybeAutoReview(id: string, turnId: string): Promise<void> {
+    const settings = this.deps.settings.current();
+    if (settings.reviewTrigger !== "auto") {
+      return;
+    }
+    const record = this.records.get(id);
+    if (!record || record.turns.at(-1)?.id !== turnId) {
+      return;
+    }
+    if (reviewEligibility(record, this.records.values(), settings) === null) {
+      return;
+    }
+    const result = await this.requestReview(id, undefined, "auto", turnId);
+    if (!result.ok) {
+      console.warn(`[session-manager] review auto-request skipped: ${result.reason ?? "unknown"}`);
+    }
+  }
+
+  /** Ignores the suggestion on the current turn; a later turn may suggest again. */
+  dismissReview(id: string): MutationResult {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    const latest = record.turns.at(-1);
+    if (!latest) {
+      return { ok: false, reason: "暂无可忽略的建议" };
+    }
+    if (reviewInProgress(record, this.records.values())) {
+      return { ok: false, reason: "已有进行中的审查" };
+    }
+    record.reviewDismissedTurnId = latest.id;
     this.persist();
     return { ok: true };
   }
@@ -1053,6 +1438,118 @@ export class SessionManagerService {
     record.updatedAt = this.now();
     this.persist();
     return { ok: true };
+  }
+
+  /**
+   * Reopens a session the user closed or archived. A dormant record goes
+   * through the regular resume instead. Closed agents resume with the same
+   * timeline refetch dormant sessions use; archived ones need
+   * `paseo agent reload`, the only path that unarchives before resuming.
+   */
+  reopen(id: string): Promise<MutationResult> {
+    const record = this.records.get(id);
+    if (!record) {
+      return Promise.resolve({ ok: false, reason: "会话不存在" });
+    }
+    if (record.liveness === "dormant") {
+      return this.resume(id);
+    }
+    if (record.liveness !== "closed" && record.liveness !== "archived") {
+      return Promise.resolve({ ok: false, reason: "会话未关闭" });
+    }
+    const inFlight = this.resumeTasks.get(id);
+    if (inFlight) {
+      return inFlight;
+    }
+    const paseo = this.paseo;
+    if (!paseo) {
+      return Promise.resolve({ ok: false, reason: "尚未连接到 Paseo" });
+    }
+    record.resumeState = "resuming";
+    record.resumeError = null;
+    this.persist();
+    const task = this.reopenRun(paseo, id).finally(() => {
+      this.resumeTasks.delete(id);
+    });
+    this.resumeTasks.set(id, task);
+    return task;
+  }
+
+  private async reopenRun(paseo: PaseoApi, id: string): Promise<MutationResult> {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, reason: "会话不存在" };
+    }
+    try {
+      if (record.liveness === "archived") {
+        const cli = this.deps.reloadAgentCli ?? reloadAgentViaCli;
+        const result = await cli(id);
+        if (!result.ok) {
+          return this.reopenFailed(record, result.reason ?? "重新打开失败");
+        }
+        // The daemon already resumed the agent; pull its fresh snapshot.
+        const fresh = await paseo.agents
+          .ref(id)
+          .refresh()
+          .catch(() => null);
+        if (fresh) {
+          applyAgentSnapshot(record, fresh.agent, fresh.project);
+        }
+      } else {
+        const payload = await withTimeout(
+          paseo.agents.ref(id).timeline.refetch({
+            direction: "tail",
+            limit: 1,
+            projection: "projected",
+          }),
+          RESUME_TIMEOUT_MS,
+          REOPEN_TIMEOUT_TEXT,
+        );
+        const agent = payload.agent ?? null;
+        if (agent) {
+          applyAgentSnapshot(record, agent);
+        }
+      }
+      // A forget during the await may have dropped the record.
+      const current = this.records.get(id);
+      if (!current) {
+        return { ok: false, reason: "会话不存在" };
+      }
+      if (!isActiveLiveness(current.liveness)) {
+        // Registry snapshots may lag the reload; ask once more before failing.
+        await this.reconcile().catch((error: unknown) => {
+          console.warn("[session-manager] reconcile after reopen failed", error);
+        });
+      }
+      if (!isActiveLiveness(current.liveness)) {
+        return this.reopenFailed(current, "重新打开失败：Paseo 未恢复该会话");
+      }
+      // Stale manual overrides and defers describe the pre-close session;
+      // a reopened card rejoins the board under the automatic status.
+      current.manualStatusOverride = null;
+      current.interruptedAt = null;
+      current.deferredUntil = null;
+      current.deferToQueue = false;
+      current.resumeState = "idle";
+      current.resumeError = null;
+      current.updatedAt = this.now();
+      this.persist();
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const reason =
+        message.trim() === REOPEN_TIMEOUT_TEXT
+          ? REOPEN_TIMEOUT_TEXT
+          : `重新打开失败：${describeAnalysisError(error)}`;
+      return this.reopenFailed(record, reason);
+    }
+  }
+
+  private reopenFailed(record: SessionRecord, reason: string): MutationResult {
+    record.resumeState = "failed";
+    record.resumeError = reason;
+    this.persist();
+    return { ok: false, reason };
   }
 
   private async resumeRun(paseo: PaseoApi, id: string): Promise<MutationResult> {
@@ -1136,8 +1633,9 @@ export class SessionManagerService {
     if (dormant.length === 0) {
       return;
     }
+    const lookup = this.reviewLookup();
     const candidates = dormant
-      .map((record) => ({ record, column: projectView(record, now).column }))
+      .map((record) => ({ record, column: projectView(record, now, lookup).column }))
       .filter(({ record, column }) => {
         if (policy === "attention") {
           return column === "waiting_for_user" || column === "in_progress";
@@ -1287,7 +1785,12 @@ export class SessionManagerService {
     }
     // Projected before the acknowledge so the opened card still reports the
     // ended defer once; the board marker clears on the next snapshot.
-    const detail = projectDetail(record, this.now());
+    const detail = projectDetail(
+      record,
+      this.now(),
+      this.reviewLookup(),
+      this.deps.digests?.listRuns(id) ?? [],
+    );
     this.acknowledgeDeferEnd(record);
     return detail;
   }
@@ -1300,6 +1803,85 @@ export class SessionManagerService {
     record.deferredUntil = null;
     record.deferToQueue = false;
     this.persist();
+  }
+
+  /** One logged analyzer call with its full result, for the 分析记录 dialog. */
+  analysisRun(sessionId: string, runId: number): AnalysisRun | null {
+    return this.deps.digests?.getRun(sessionId, runId) ?? null;
+  }
+
+  /**
+   * Mermaid source + per-turn digest list for the flow section. Turns come
+   * from history.db; turns not yet written there come from the live record.
+   */
+  flow(id: string): { ok: true; code: string; turns: FlowTurn[] } | { ok: false; error: string } {
+    const record = this.records.get(id);
+    if (!record) {
+      return { ok: false, error: "会话不存在" };
+    }
+    const historyLabelByTurn = new Map<string, string>();
+    for (const entry of record.history) {
+      if (!historyLabelByTurn.has(entry.turnId)) {
+        historyLabelByTurn.set(entry.turnId, entry.text);
+      }
+    }
+    const merged: FlowTurnInput[] = [];
+    const known = new Set<string>();
+    for (const row of this.deps.digests?.listTurns(id) ?? []) {
+      known.add(row.turnId);
+      merged.push({
+        turnId: row.turnId,
+        completedAt: row.completedAt,
+        userInput: row.userInput,
+        step: row.step,
+        historyLabel: historyLabelByTurn.get(row.turnId) ?? null,
+        digest: row.digest,
+        outcome: row.outcome,
+        declared: row.declared,
+        subAgents: row.subAgents,
+      });
+    }
+    for (const turn of record.turns) {
+      if (known.has(turn.id)) {
+        continue;
+      }
+      merged.push({
+        turnId: turn.id,
+        completedAt: turn.completedAt,
+        userInput: turn.userInput === null ? null : turn.userInput.slice(0, 300),
+        step: null,
+        historyLabel: historyLabelByTurn.get(turn.id) ?? null,
+        digest: null,
+        outcome: turn.outcome,
+        declared: turn.declared ?? null,
+        subAgents: [],
+      });
+    }
+    const now = this.now();
+    const lookup = this.reviewLookup();
+    const children: FlowChild[] = [];
+    for (const child of this.records.values()) {
+      if (child.id === id || child.parentAgentId !== id) {
+        continue;
+      }
+      const column = projectView(child, now, lookup).column;
+      const declared = child.turns.at(-1)?.declared ?? null;
+      children.push({
+        id: child.id,
+        createdAt: child.createdAt,
+        columnLabel: COLUMNS.find((item) => item.id === column)?.label ?? column,
+        detail: declared
+          ? `${DECLARED_KIND_LABELS[declared.kind]}：${declared.text}`
+          : (child.agentTitle ?? child.analysis?.title ?? null),
+      });
+    }
+    const running =
+      isActiveLiveness(record.liveness) &&
+      (record.lifecycle === "working" || record.lifecycle === "waiting_permission")
+        ? (record.analysis?.now ?? "运行中")
+        : null;
+    const result = buildFlow({ turns: merged, children, running });
+    return { ok: true, code: result.code, turns: result.turns };
   }
 
   // ---- snapshot / reconcile / seed -------------------------------------
@@ -1315,6 +1897,7 @@ export class SessionManagerService {
     const settings = this.deps.settings.current();
     const config = normalizeAnalysisConfig(settings);
     const now = this.now();
+    const lookup = this.reviewLookup();
     const cutoff = now - settings.closedRetentionDays * DAY_MS;
     const sessions = [...this.records.values()]
       .filter(
@@ -1324,7 +1907,7 @@ export class SessionManagerService {
             (record.archivedAt ?? record.updatedAt) >= cutoff),
       )
       .map(function project(record) {
-        return projectView(record, now);
+        return projectView(record, now, lookup);
       })
       .sort((left, right) => right.updatedAt - left.updatedAt);
     return {
@@ -1426,28 +2009,66 @@ export class SessionManagerService {
           existing.interruptedAt = this.now();
           changed = true;
         }
+        this.pruneReviewerLabels(existing);
         continue;
       }
       const archivedAt = agent.archivedAt ? Date.parse(agent.archivedAt) : null;
       if (archivedAt !== null && Number.isFinite(archivedAt) && this.now() - archivedAt > retention) {
         continue;
       }
-      this.records.set(agent.id, newRecord(agent, this.now(), entry.project));
+      const created = newRecord(agent, this.now(), entry.project);
+      this.records.set(agent.id, created);
+      this.pruneReviewerLabels(created);
       changed = true;
     }
     if (complete) {
       for (const id of knownBefore) {
         if (!seen.has(id) && this.records.has(id)) {
           this.records.delete(id);
+          this.deps.digests?.removeSession(id);
           changed = true;
         }
       }
     }
+    changed = this.backfillReviewers() || changed;
     // A failed pass retries as "first" so crash recovery still applies.
     this.reconciledOnce = true;
     if (changed) {
       this.persist();
     }
+  }
+
+  /**
+   * Reload-gap cover: a reviewer created while the plugin was down joins its
+   * parent's open review (matched by parentAgentId + createdAt); one labeled
+   * for another review stays out.
+   */
+  private backfillReviewers(): boolean {
+    let changed = false;
+    for (const record of this.records.values()) {
+      const review = record.review;
+      if (!review || review.closedAt !== null || review.error !== null) {
+        continue;
+      }
+      for (const child of this.records.values()) {
+        if (
+          child.id === record.id ||
+          child.parentAgentId !== record.id ||
+          child.createdAt < review.requestedAt ||
+          review.reviewerIds.includes(child.id) ||
+          review.reviewerIds.length >= MAX_REVIEWERS
+        ) {
+          continue;
+        }
+        const tagged = child.labels[REVIEW_LABEL];
+        if (tagged !== undefined && tagged !== review.id) {
+          continue;
+        }
+        review.reviewerIds.push(child.id);
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   /** Backfills recent turns for sessions that have none; runs once, in the background. */
@@ -1480,7 +2101,7 @@ export class SessionManagerService {
           if (!record || record.turns.length > 0) {
             continue;
           }
-          const turns = turnsFromTimelineEntries(result.entries);
+          const built = turnsFromTimelineEntries(result.entries, result.hasOlder);
           if (!record.firstUserMessageKnown && result.hasOlder === false) {
             const first = firstUserMessageFrom(result.entries.map((entry) => entry.item));
             if (first) {
@@ -1488,11 +2109,14 @@ export class SessionManagerService {
               record.firstUserMessageKnown = true;
             }
           }
-          if (turns.length === 0) {
+          if (built.length === 0) {
             continue;
           }
-          record.turns = turns;
-          record.completedAt = turns.at(-1)?.completedAt ?? null;
+          record.turns = built.map((entry) => entry.turn);
+          record.completedAt = built.at(-1)?.turn.completedAt ?? null;
+          for (const entry of built) {
+            this.deps.digests?.upsertTurn(record.id, entry.turn, entry.subAgents, this.now());
+          }
           if (analyzeBudget > 0) {
             analyzeBudget -= 1;
             record.analysisState = "queued";

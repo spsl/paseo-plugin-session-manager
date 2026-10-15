@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { newRecord } from "./lifecycle";
 import { projectDetail, projectView } from "./projection";
+import type { ReviewLookup } from "./review";
 import type { SessionRecord } from "./store";
 
 function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
@@ -197,5 +198,124 @@ describe("declared results", () => {
       record({ turns: [turnWith("blocked"), later], analysis: analysis("in_progress") }),
     );
     expect(view).toMatchObject({ effectiveStatus: "in_progress", declared: null });
+  });
+});
+
+describe("review phases", () => {
+  const openReview = (overrides = {}) => ({
+    id: "rv_1",
+    turnId: "t1",
+    trigger: "manual" as const,
+    requestedAt: 10,
+    baseHead: null,
+    reviewerIds: [] as string[],
+    verifiedTurnId: null,
+    verdict: null,
+    error: null,
+    closedAt: null,
+    ...overrides,
+  });
+  const lookupOf = (records: SessionRecord[]): ReviewLookup => {
+    const map = new Map(records.map((entry) => [entry.id, entry]));
+    return {
+      get: (id) => map.get(id),
+      all: () => map.values(),
+      settings: {
+        enabled: true,
+        agent: "codex",
+        model: "m",
+        thinkingLevel: "low",
+        systemPrompt: "",
+        command: "",
+        magpieBaseUrl: "",
+        magpieApiKey: "",
+        concurrency: 2,
+        timeoutSeconds: 120,
+        writeBackTitle: false,
+        seedAnalyzeLimit: 10,
+        closedRetentionDays: 7,
+        autoResume: "attention",
+        teamRecovery: "notify",
+        reviewTrigger: "suggest",
+        reviewScope: "since_last_review",
+        reviewPrompt: "",
+        columnWidthPercent: 90,
+        excludedLabelKeys: "herald.role",
+      },
+    };
+  };
+
+  it("a running review counts as in_progress; attention phases outrank the model", () => {
+    const parent = record({
+      liveness: "live",
+      lifecycle: "idle",
+      analysis: analysis("completed"),
+      review: openReview({ reviewerIds: ["r1"] }),
+    });
+    const reviewer = record({ id: "r1", lifecycle: "working" });
+    const view = projectView(parent, 1_000, lookupOf([parent, reviewer]));
+    expect(view.review?.phase).toBe("reviewing");
+    expect(view).toMatchObject({ effectiveStatus: "in_progress", column: "in_progress" });
+    // awaiting_confirmation / failed / interrupted land in 需要处理.
+    const verified = record({
+      liveness: "live",
+      lifecycle: "idle",
+      analysis: analysis("completed"),
+      review: openReview({ reviewerIds: ["r1"], verifiedTurnId: "t2" }),
+    });
+    const waiting = projectView(verified, 1_000, lookupOf([verified, reviewer]));
+    expect(waiting).toMatchObject({ effectiveStatus: "waiting_for_user", column: "waiting_for_user" });
+    const failed = record({
+      liveness: "live",
+      lifecycle: "idle",
+      analysis: analysis("completed"),
+      review: openReview({ error: "没创建子 Agent" }),
+    });
+    expect(projectView(failed, 1_000, lookupOf([failed])).review?.phase).toBe("failed");
+    expect(projectView(failed, 1_000, lookupOf([failed])).column).toBe("waiting_for_user");
+  });
+
+  it("yields to manual override, interruption and a running turn", () => {
+    const parent = record({
+      liveness: "live",
+      lifecycle: "idle",
+      manualStatusOverride: "completed",
+      review: openReview({ reviewerIds: ["r1"], verifiedTurnId: "t2" }),
+    });
+    const reviewer = record({ id: "r1", lifecycle: "working" });
+    expect(projectView(parent, 1_000, lookupOf([parent, reviewer])).column).toBe("completed");
+    const working = record({
+      liveness: "live",
+      lifecycle: "working",
+      review: openReview({ reviewerIds: ["r1"], verifiedTurnId: "t2" }),
+    });
+    // Working outranks the review phase in the status, while the badge stays.
+    const workingView = projectView(working, 1_000, lookupOf([working, reviewer]));
+    expect(workingView.review?.phase).toBe("awaiting_confirmation");
+    expect(workingView.effectiveStatus).toBe("in_progress");
+  });
+
+  it("declared results outrank a suggested review, not an active one", () => {
+    const declared = {
+      id: "t1",
+      dedupeKey: "k",
+      userInput: "u",
+      agentOutput: "o",
+      outcome: "completed" as const,
+      completedAt: 2,
+      contextIncomplete: false,
+      declared: { kind: "done" as const, text: "好了" },
+    };
+    const active = record({
+      liveness: "live",
+      lifecycle: "idle",
+      turns: [declared],
+      review: openReview({ error: "x" }),
+    });
+    expect(projectView(active, 1_000, lookupOf([active])).column).toBe("waiting_for_user");
+    // suggested never changes the column.
+    expect(projectView(record({ liveness: "live", analysis: analysis("completed") })).column).toBe(
+      "completed",
+    );
   });
 });

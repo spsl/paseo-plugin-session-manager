@@ -279,6 +279,12 @@ export function BoardScreen(props: PluginScreenProps) {
     },
     [actions],
   );
+  const onReopen = useCallback(
+    function reopen(session: SessionView) {
+      void actions.reopen(session.id);
+    },
+    [actions],
+  );
 
   const onOpen = useCallback(function open(session: SessionView) {
     setOpenId(session.id);
@@ -396,6 +402,7 @@ export function BoardScreen(props: PluginScreenProps) {
           onToggleSubagents={onToggleSubagents}
           onDefer={onDefer}
           onResume={onResume}
+          onReopen={onReopen}
           columnId={activeColumn}
         />
       </View>
@@ -413,6 +420,7 @@ export function BoardScreen(props: PluginScreenProps) {
         onToggleSubagents={onToggleSubagents}
         onDefer={onDefer}
         onResume={onResume}
+        onReopen={onReopen}
         columnWidthPercent={columnWidthPercent}
       />
     );
