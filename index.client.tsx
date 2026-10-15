@@ -1,5 +1,10 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { BoardScreen, bindSettingsOpener, SETTINGS_SCREEN_ID } from "./client/board-screen";
+import {
+  BoardScreen,
+  bindSettingsOpener,
+  LAUNCH_PARAM,
+  SETTINGS_SCREEN_ID,
+} from "./client/board-screen";
 import { SessionManagerSettingsScreen } from "./client/settings-screen";
 import {
   consumeBoardHandoff,
@@ -57,6 +62,19 @@ export default function contribute(client: PluginClientContext) {
       context: "global",
       onSelect({ openScreen }) {
         openScreen({ screenId: BOARD_SCREEN_ID });
+      },
+    }),
+  );
+  cleanups.push(
+    client.addCommandCenterItem({
+      id: "launch-session",
+      title: "新建会话（选择工作区）",
+      icon: "Plus",
+      keywords: ["新建", "会话", "工作区", "worktree", "new", "session", "agent", "launch"],
+      context: "global",
+      onSelect({ openScreen }) {
+        // A fresh nonce each time, so the board opens the dialog even when already shown.
+        openScreen({ screenId: BOARD_SCREEN_ID, params: { [LAUNCH_PARAM]: String(Date.now()) } });
       },
     }),
   );

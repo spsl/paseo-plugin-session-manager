@@ -1,11 +1,14 @@
 import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { workspaceActivity } from "../shared/launch";
 import { COLUMNS } from "../shared/presentation";
 import { ANALYZER_SETTINGS, DEFAULT_ANALYZER_SETTINGS } from "../shared/settings";
 import {
   buildProjectFilter,
+  buildProjectWorkspaces,
   filterSessionsByProjectSearch,
   retainAvailableProjectSelection,
   searchProjectOptions,
@@ -27,10 +30,12 @@ import {
 } from "./board-model";
 import { SingleColumn, WideColumns } from "./board-columns";
 import { DeferMenu } from "./defer-menu";
+import { LaunchDialog } from "./launch-dialog";
 import { ProjectSearch } from "./project-search";
 import { SessionOverlay } from "./session-overlay";
+import { WorkspacePicker, type WorkspacePickTarget } from "./workspace-picker";
 import { columnTone, errorText } from "./styles";
-import { useSessionActions, useSnapshot } from "./use-snapshot";
+import { SNAPSHOT_QUERY_KEY, useSessionActions, useSnapshot } from "./use-snapshot";
 
 /**
  * A screen is given no way to open a settings screen, so index.client.tsx lends
@@ -43,6 +48,16 @@ export function bindSettingsOpener(open: ((id: string) => void) | null): void {
 }
 
 export const SETTINGS_SCREEN_ID = "session-manager";
+
+/**
+ * `params.launch` opens the 新建会话 dialog (the Command Center passes a fresh
+ * nonce); each nonce opens it once, so returning to the screen does not.
+ */
+export const LAUNCH_PARAM = "launch";
+const consumedLaunches = new Set<string>();
+
+/** How long a just-created session may take to reach the board before the detail gives up. */
+const FRESH_SESSION_MS = 15_000;
 
 function initExpansion(hitChildId: string | null): ExpansionState {
   return { toggled: new Set<string>(), hitChildId };
@@ -92,6 +107,45 @@ export function BoardScreen(props: PluginScreenProps) {
       }
     },
     [paramSessionId],
+  );
+
+  const queryClient = useQueryClient();
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const launchParam = params[LAUNCH_PARAM] ?? null;
+  useEffect(
+    function openLaunch() {
+      if (launchParam !== null && !consumedLaunches.has(launchParam)) {
+        consumedLaunches.add(launchParam);
+        setLaunchOpen(true);
+      }
+    },
+    [launchParam],
+  );
+  // The session just created from the dialog: its detail waits for the
+  // plugin to pick it up instead of reporting it missing.
+  const [freshId, setFreshId] = useState<string | null>(null);
+  useEffect(
+    function expireFresh() {
+      if (freshId === null) {
+        return undefined;
+      }
+      const timer = setTimeout(function expire() {
+        setFreshId(null);
+      }, FRESH_SESSION_MS);
+      return function stop() {
+        clearTimeout(timer);
+      };
+    },
+    [freshId],
+  );
+  const onLaunched = useCallback(
+    function launched(agentId: string) {
+      setLaunchOpen(false);
+      setFreshId(agentId);
+      setOpenId(agentId);
+      void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
+    },
+    [queryClient],
   );
 
   const standalone = params.standalone === "1";
@@ -172,6 +226,12 @@ export function BoardScreen(props: PluginScreenProps) {
       return buildProjectFilter(allSessions);
     },
     [allSessions],
+  );
+  const workspacesByProject = useMemo(
+    function workspaces() {
+      return buildProjectWorkspaces(allSessions, filter.projectKeyBySessionId);
+    },
+    [allSessions, filter],
   );
   useEffect(
     function retain() {
@@ -289,6 +349,17 @@ export function BoardScreen(props: PluginScreenProps) {
   const onOpen = useCallback(function open(session: SessionView) {
     setOpenId(session.id);
   }, []);
+
+  const [workspacePick, setWorkspacePick] = useState<WorkspacePickTarget | null>(null);
+  // Jumping away would replace the board itself in a standalone window, so
+  // only the board embedded in the main window offers it.
+  const openWorkspace =
+    navigation !== undefined && !standalone
+      ? function open(workspaceId: string) {
+          setWorkspacePick(null);
+          navigation.openWorkspace({ workspaceId });
+        }
+      : null;
 
   function toggleProject(key: string): void {
     const next = new Set(selected);
@@ -448,6 +519,31 @@ export function BoardScreen(props: PluginScreenProps) {
           )}
         </View>
         {compact ? null : <View style={{ flex: 1, marginHorizontal: 12 }}>{search}</View>}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="新建会话"
+          hitSlop={compact ? 8 : 4}
+          onPress={function openLaunch() {
+            setLaunchOpen(true);
+          }}
+          style={function launchStyle(state) {
+            return {
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              paddingHorizontal: compact ? 6 : 10,
+              paddingVertical: 6,
+              borderRadius: 8,
+              backgroundColor: compact ? "transparent" : colors.accent,
+              opacity: state.pressed ? 0.8 : 1,
+            };
+          }}
+        >
+          <Icon name="Plus" size={compact ? 18 : 14} color={compact ? colors.foregroundMuted : colors.accentForeground} />
+          {compact ? null : (
+            <Text style={{ color: colors.accentForeground, fontSize: 12, fontWeight: "600" }}>新建会话</Text>
+          )}
+        </Pressable>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{countLabel}</Text>
         {desktop && !standalone ? (
           <Pressable
@@ -537,6 +633,22 @@ export function BoardScreen(props: PluginScreenProps) {
             }}
           />
           {(hits ?? filter.options).map(function renderOption(option) {
+            const workspaces = workspacesByProject.get(option.key) ?? [];
+            const accessory =
+              openWorkspace === null || workspaces.length === 0
+                ? undefined
+                : {
+                    icon: "ExternalLink",
+                    label: `在 Paseo 中打开 ${option.label}`,
+                    onPress: function jump() {
+                      const only = workspaces.length === 1 ? workspaces[0] : undefined;
+                      if (only !== undefined) {
+                        openWorkspace(only.workspaceId);
+                      } else {
+                        setWorkspacePick({ projectLabel: option.label, workspaces });
+                      }
+                    },
+                  };
             return (
               <Chip
                 key={option.key}
@@ -544,6 +656,7 @@ export function BoardScreen(props: PluginScreenProps) {
                 label={`${option.label}（${cardCountByProjectKey.get(option.key) ?? 0}）`}
                 selected={selected.has(option.key)}
                 highlighted={hits !== null}
+                accessory={accessory}
                 onPress={function toggle() {
                   toggleProject(option.key);
                 }}
@@ -565,8 +678,34 @@ export function BoardScreen(props: PluginScreenProps) {
         theme={theme}
         compact={compact}
         navigation={navigation}
+        awaitingNew={openId !== null && openId === freshId}
         onClose={function close() {
           setOpenId(null);
+        }}
+      />
+
+      {launchOpen ? (
+        <LaunchDialog
+          theme={theme}
+          compact={compact}
+          initialQuery={query}
+          boardWorkspaceKey={workspaceKey}
+          recentActivity={workspaceActivity(allSessions)}
+          onClose={function closeLaunch() {
+            setLaunchOpen(false);
+          }}
+          onCreated={onLaunched}
+        />
+      ) : null}
+
+      <WorkspacePicker
+        target={workspacePick}
+        theme={theme}
+        onPick={function pick(workspaceId) {
+          openWorkspace?.(workspaceId);
+        }}
+        onClose={function close() {
+          setWorkspacePick(null);
         }}
       />
 

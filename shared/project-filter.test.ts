@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProjectFilter,
+  buildProjectWorkspaces,
   filterSessionsByProject,
   filterSessionsByProjectSearch,
   retainAvailableProjectSelection,
@@ -100,5 +101,46 @@ describe("project filter", () => {
     // A selected chip the search hides does not blank the board.
     expect(ids(new Set(["k3"]), "1022")).toEqual(["a", "b"]);
     expect(ids(new Set(), "nothing")).toEqual([]);
+  });
+
+  it("lists each project's unarchived workspaces, most recent first", () => {
+    const sessions = [
+      makeSession({ id: "main", projectKey: "p", workspaceId: "w-main", workspaceName: "开发看板", branch: "main" }),
+      makeSession({
+        id: "main-2",
+        projectKey: "p",
+        workspaceId: "w-main",
+        workspaceName: "开发看板",
+        branch: "main",
+        updatedAt: 5_000,
+      }),
+      makeSession({
+        id: "tree",
+        projectKey: "p",
+        workspaceId: "w-tree",
+        workspaceName: null,
+        cwd: "/w/team-align",
+        branch: "team/align",
+        updatedAt: 3_000,
+      }),
+      makeSession({ id: "old", projectKey: "p", workspaceId: "w-old", updatedAt: 9_000, liveness: "archived" }),
+      makeSession({ id: "dir", projectKey: "q", workspaceId: "w-dir", workspaceName: "下载", cwd: "/Users/ada/Downloads" }),
+      makeSession({ id: "none", projectKey: "q", workspaceId: null, updatedAt: 4_000 }),
+    ];
+    const filter = buildProjectFilter(sessions);
+    const workspaces = buildProjectWorkspaces(sessions, filter.projectKeyBySessionId);
+    expect(workspaces.get("p")).toEqual([
+      { workspaceId: "w-main", label: "开发看板", detail: "main", latestUpdatedAt: 5_000 },
+      { workspaceId: "w-tree", label: "team-align", detail: "team/align", latestUpdatedAt: 3_000 },
+    ]);
+    expect(workspaces.get("q")).toEqual([
+      { workspaceId: "w-dir", label: "下载", detail: "/Users/ada/Downloads", latestUpdatedAt: 1_000 },
+    ]);
+  });
+
+  it("drops a project whose workspaces are all archived", () => {
+    const sessions = [makeSession({ id: "gone", projectKey: "p", workspaceId: "w", liveness: "archived" })];
+    const filter = buildProjectFilter(sessions);
+    expect(buildProjectWorkspaces(sessions, filter.projectKeyBySessionId).has("p")).toBe(false);
   });
 });

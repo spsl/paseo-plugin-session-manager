@@ -163,3 +163,60 @@ export function retainAvailableProjectSelection(
   }
   return retained;
 }
+
+export type ProjectWorkspace = {
+  workspaceId: string;
+  label: string;
+  /** Branch, else the directory, to tell the workspaces of one project apart. */
+  detail: string;
+  latestUpdatedAt: number;
+};
+
+function lastPathSegment(path: string): string {
+  const parts = path.split("/").filter(function nonEmpty(part) {
+    return part !== "";
+  });
+  return parts[parts.length - 1] ?? path;
+}
+
+function compareWorkspaces(left: ProjectWorkspace, right: ProjectWorkspace): number {
+  return right.latestUpdatedAt - left.latestUpdatedAt || left.label.localeCompare(right.label, "zh-CN");
+}
+
+/**
+ * The Paseo workspaces behind each project chip, most recent first. Archived
+ * sessions don't count: an archived workspace only holds archived sessions,
+ * so it drops out instead of offering a jump to a workspace Paseo hides.
+ */
+export function buildProjectWorkspaces(
+  sessions: readonly SessionView[],
+  projectKeyBySessionId: ReadonlyMap<string, string>,
+): ReadonlyMap<string, readonly ProjectWorkspace[]> {
+  const byProject = new Map<string, Map<string, ProjectWorkspace>>();
+  for (const session of sessions) {
+    const workspaceId = session.workspaceId?.trim();
+    if (!workspaceId || session.liveness === "archived") {
+      continue;
+    }
+    const projectKey = projectKeyBySessionId.get(session.id) ?? projectKeyOf(session);
+    let workspaces = byProject.get(projectKey);
+    if (workspaces === undefined) {
+      workspaces = new Map<string, ProjectWorkspace>();
+      byProject.set(projectKey, workspaces);
+    }
+    const current = workspaces.get(workspaceId);
+    if (current === undefined || session.updatedAt > current.latestUpdatedAt) {
+      workspaces.set(workspaceId, {
+        workspaceId,
+        label: session.workspaceName?.trim() || lastPathSegment(session.cwd),
+        detail: session.branch?.trim() || session.cwd,
+        latestUpdatedAt: session.updatedAt,
+      });
+    }
+  }
+  const result = new Map<string, readonly ProjectWorkspace[]>();
+  for (const [projectKey, workspaces] of byProject) {
+    result.set(projectKey, Array.from(workspaces.values()).sort(compareWorkspaces));
+  }
+  return result;
+}

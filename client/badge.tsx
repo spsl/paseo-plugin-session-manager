@@ -1,4 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
+import { Icon } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
 import { toneBackground } from "./styles";
 
@@ -25,35 +26,66 @@ export function Chip(props: {
   /** Tints the label without selecting, e.g. a search hit. */
   highlighted?: boolean;
   disabled?: boolean;
+  /** A trailing icon button with its own action, separate from pressing the chip. */
+  accessory?: { icon: string; label: string; onPress(): void };
   onPress(): void;
 }) {
   const { colors } = props.theme;
   const tone = props.tone ?? colors.accent;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected: props.selected, disabled: props.disabled === true }}
-      disabled={props.disabled === true}
-      onPress={props.onPress}
+  const disabled = props.disabled === true;
+  const accessory = props.accessory;
+  const frame = {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: props.selected ? tone : colors.border,
+    backgroundColor: props.selected ? toneBackground(props.theme, tone) : colors.surface1,
+    opacity: disabled ? 0.5 : 1,
+  };
+  const text = (
+    <Text
       style={{
-        paddingHorizontal: 10,
-        paddingVertical: 5,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: props.selected ? tone : colors.border,
-        backgroundColor: props.selected ? toneBackground(props.theme, tone) : colors.surface1,
-        opacity: props.disabled === true ? 0.5 : 1,
+        color: props.selected || props.highlighted === true ? tone : colors.foreground,
+        fontSize: 12,
+        fontWeight: props.selected ? "600" : "400",
       }}
     >
-      <Text
-        style={{
-          color: props.selected || props.highlighted === true ? tone : colors.foreground,
-          fontSize: 12,
-          fontWeight: props.selected ? "600" : "400",
-        }}
+      {props.label}
+    </Text>
+  );
+  if (accessory === undefined) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ selected: props.selected, disabled }}
+        disabled={disabled}
+        onPress={props.onPress}
+        style={{ paddingHorizontal: 10, paddingVertical: 5, ...frame }}
       >
-        {props.label}
-      </Text>
-    </Pressable>
+        {text}
+      </Pressable>
+    );
+  }
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", ...frame }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ selected: props.selected, disabled }}
+        disabled={disabled}
+        onPress={props.onPress}
+        style={{ paddingLeft: 10, paddingRight: 4, paddingVertical: 5 }}
+      >
+        {text}
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={accessory.label}
+        disabled={disabled}
+        hitSlop={4}
+        onPress={accessory.onPress}
+        style={{ paddingLeft: 2, paddingRight: 9, paddingVertical: 5 }}
+      >
+        <Icon name={accessory.icon} size={12} color={colors.foregroundMuted} />
+      </Pressable>
+    </View>
   );
 }

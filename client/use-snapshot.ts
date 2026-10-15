@@ -63,7 +63,8 @@ export function useSnapshot() {
   });
 }
 
-export function useDetail(sessionId: string | null) {
+/** `awaitingNew` polls fast until a just-created session shows up. */
+export function useDetail(sessionId: string | null, awaitingNew = false) {
   const load = useRpc(detailRpc);
   return useQuery({
     queryKey: [...DETAIL_QUERY_KEY, sessionId],
@@ -71,7 +72,9 @@ export function useDetail(sessionId: string | null) {
     queryFn: async function loadDetail(): Promise<DetailData> {
       return load({ sessionId: sessionId ?? "" });
     },
-    refetchInterval: 5_000,
+    refetchInterval: function interval(query) {
+      return awaitingNew && !query.state.data?.session ? 500 : 5_000;
+    },
   });
 }
 

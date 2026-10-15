@@ -31,6 +31,8 @@ type Props = {
   theme: PluginTheme;
   compact: boolean;
   navigation: PluginScreenProps["navigation"];
+  /** Just created from the board: wait for it to arrive rather than report it missing. */
+  awaitingNew?: boolean;
   onClose(): void;
 };
 
@@ -39,7 +41,8 @@ type Tab = "overview" | "conversation";
 export function SessionOverlay(props: Props) {
   const { sessionId, theme, compact, onClose } = props;
   const { colors } = theme;
-  const detail = useDetail(sessionId);
+  const awaitingNew = props.awaitingNew === true;
+  const detail = useDetail(sessionId, awaitingNew);
   const [deferOpen, setDeferOpen] = useState(false);
   const queryClient = useQueryClient();
   const deferEndedAt = detail.data?.session?.deferEndedAt ?? null;
@@ -65,7 +68,7 @@ export function SessionOverlay(props: Props) {
     : undefined;
 
   let body;
-  if (detail.isLoading) {
+  if (detail.isLoading || (awaitingNew && session === null)) {
     body = (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
         <ActivityIndicator color={colors.accent} />

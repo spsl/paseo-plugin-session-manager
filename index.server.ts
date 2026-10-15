@@ -1,4 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { LAUNCH_SETTINGS } from "./shared/launch";
 import { ANALYZER_SETTINGS } from "./shared/settings";
 import { SPEECH_SETTINGS } from "./shared/speech";
 import { AnnouncementFeed } from "./server/announcements";
@@ -17,6 +18,8 @@ import { JsonStateStore } from "./server/store";
 export default function contribute(server: PluginServerContext) {
   const settingsHandle = server.registerSettings(ANALYZER_SETTINGS);
   const speechHandle = server.registerSettings(SPEECH_SETTINGS);
+  // Only the board's 新建会话 dialog reads and writes this; the server just hosts it.
+  server.registerSettings(LAUNCH_SETTINGS);
   const speechSettings = new SpeechSettingsCache(speechHandle);
   const feed = new AnnouncementFeed();
   const notifier = new CardNotifier({
